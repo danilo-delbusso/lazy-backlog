@@ -227,12 +227,14 @@ export class ConfluenceClient {
       throw err; // 4xx — don't retry
     }
 
-    const error =
-      err instanceof Error && err.name === "TimeoutError"
-        ? new Error(`Confluence API timeout (${REQUEST_TIMEOUT_MS}ms)`)
-        : err instanceof Error
-          ? err
-          : new Error(String(err));
+    let error: Error;
+    if (err instanceof Error && err.name === "TimeoutError") {
+      error = new Error(`Confluence API timeout (${REQUEST_TIMEOUT_MS}ms)`);
+    } else if (err instanceof Error) {
+      error = err;
+    } else {
+      error = new Error(String(err));
+    }
 
     if (attempt < MAX_RETRIES - 1) {
       await Bun.sleep(INITIAL_BACKOFF_MS * (1 << attempt));
