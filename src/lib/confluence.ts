@@ -107,10 +107,10 @@ const MAX_CONCURRENT_REQUESTS = 10;
 // ── Semaphore for bounded concurrency ──────────────────────────────────────
 
 class Semaphore {
-  private queue: (() => void)[] = [];
+  private readonly queue: (() => void)[] = [];
   private active = 0;
 
-  constructor(private limit: number) {}
+  constructor(private readonly limit: number) {}
 
   async acquire(): Promise<void> {
     if (this.active < this.limit) {
@@ -135,9 +135,9 @@ class Semaphore {
 // ── Client ─────────────────────────────────────────────────────────────────
 
 export class ConfluenceClient {
-  private baseUrl: string;
-  private headers: Record<string, string>;
-  private semaphore: Semaphore;
+  private readonly baseUrl: string;
+  private readonly headers: Record<string, string>;
+  private readonly semaphore: Semaphore;
 
   constructor(config: ProjectConfig) {
     this.baseUrl = config.siteUrl.replace(/\/$/, "");
@@ -170,7 +170,7 @@ export class ConfluenceClient {
 
           if (response.status === 429) {
             const retryAfter = response.headers.get("Retry-After");
-            const waitMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : INITIAL_BACKOFF_MS * (1 << attempt);
+            const waitMs = retryAfter ? Number.parseInt(retryAfter, 10) * 1000 : INITIAL_BACKOFF_MS * (1 << attempt);
             await Bun.sleep(waitMs);
             continue;
           }
@@ -315,72 +315,87 @@ export class ConfluenceClient {
   }
 }
 
-// ── HTML→Markdown converter (preserves structure, maximises context density) ─
+// ── HTML→Markdown helper functions (extracted to reduce cognitive complexity) ─
 
-export function htmlToMarkdown(html: string): string {
-  let md = html;
+function stripTags(text: string): string {
+  return text.replaceAll(RE_ALL_TAGS, "");
+}
 
-  // Remove noise
-  md = md.replace(RE_MACRO, "");
-  md = md.replace(RE_STYLE, "");
-  md = md.replace(RE_SCRIPT, "");
+function removeNoise(md: string): string {
+  return md.replaceAll(RE_MACRO, "").replaceAll(RE_STYLE, "").replaceAll(RE_SCRIPT, "");
+}
 
-  // Preserve code blocks before stripping tags
-  md = md.replace(RE_PRE, (_, content: string) => `\n\`\`\`\n${content}\n\`\`\`\n`);
-  md = md.replace(RE_CODE, "`$1`");
+function convertCodeBlocks(md: string): string {
+  md = md.replaceAll(RE_PRE, (_, content: string) => `\n\`\`\`\n${content}\n\`\`\`\n`);
+  md = md.replaceAll(RE_CODE, "`$1`");
+  return md;
+}
 
-  // Structural elements → markdown equivalents
-  md = md.replace(RE_HEADING, (_, level: string, content: string) => {
-    const prefix = "#".repeat(parseInt(level, 10));
-    return `\n${prefix} ${content.replace(RE_ALL_TAGS, "").trim()}\n`;
+function convertHeadings(md: string): string {
+  return md.replaceAll(RE_HEADING, (_, level: string, content: string) => {
+    const prefix = "#".repeat(Number.parseInt(level, 10));
+    return `\n${prefix} ${stripTags(content).trim()}\n`;
   });
+}
 
-  // Tables → markdown tables
-  md = md.replace(RE_TABLE_ROW, (_, rowContent: string) => {
-    const headers: string[] = [];
-    const cells: string[] = [];
-    rowContent.replace(RE_TABLE_HEADER, (__, cellContent: string) => {
-      headers.push(cellContent.replace(RE_ALL_TAGS, "").trim());
-      return "";
-    });
-    rowContent.replace(RE_TABLE_CELL, (__, cellContent: string) => {
-      cells.push(cellContent.replace(RE_ALL_TAGS, "").trim());
-      return "";
-    });
-
-    if (headers.length > 0) {
-      return `| ${headers.join(" | ")} |\n| ${headers.map(() => "---").join(" | ")} |`;
-    }
-    if (cells.length > 0) {
-      return `| ${cells.join(" | ")} |`;
-    }
+function convertTableRow(_match: string, rowContent: string): string {
+  const headers: string[] = [];
+  const cells: string[] = [];
+  rowContent.replaceAll(RE_TABLE_HEADER, (__, cellContent: string) => {
+    headers.push(stripTags(cellContent).trim());
+    return "";
+  });
+  rowContent.replaceAll(RE_TABLE_CELL, (__, cellContent: string) => {
+    cells.push(stripTags(cellContent).trim());
     return "";
   });
 
-  // Links
-  md = md.replace(RE_LINK, (_, href: string, text: string) => {
-    const clean = text.replace(RE_ALL_TAGS, "").trim();
+  if (headers.length > 0) {
+    return `| ${headers.join(" | ")} |\n| ${headers.map(() => "---").join(" | ")} |`;
+  }
+  if (cells.length > 0) {
+    return `| ${cells.join(" | ")} |`;
+  }
+  return "";
+}
+
+function convertLinks(md: string): string {
+  return md.replaceAll(RE_LINK, (_, href: string, text: string) => {
+    const clean = stripTags(text).trim();
     return clean === href ? clean : `[${clean}](${href})`;
   });
+}
 
-  // Inline formatting
-  md = md.replace(RE_BOLD, "**$1**");
-  md = md.replace(RE_ITALIC, "*$1*");
+function convertInlineFormatting(md: string): string {
+  md = md.replaceAll(RE_BOLD, "**$1**");
+  md = md.replaceAll(RE_ITALIC, "*$1*");
+  return md;
+}
 
-  // Block elements
-  md = md.replace(RE_BR, "\n");
-  md = md.replace(RE_P_CLOSE, "\n\n");
-  md = md.replace(RE_LI_OPEN, "- ");
-  md = md.replace(RE_LI_CLOSE, "\n");
+function convertBlockElements(md: string): string {
+  md = md.replaceAll(RE_BR, "\n");
+  md = md.replaceAll(RE_P_CLOSE, "\n\n");
+  md = md.replaceAll(RE_LI_OPEN, "- ");
+  md = md.replaceAll(RE_LI_CLOSE, "\n");
+  return md;
+}
 
-  // Strip remaining tags
-  md = md.replace(RE_ALL_TAGS, "");
+function decodeEntities(md: string): string {
+  return md.replaceAll(RE_ENTITY, (match) => ENTITY_MAP[match] || match);
+}
 
-  // Decode entities
-  md = md.replace(RE_ENTITY, (match) => ENTITY_MAP[match] || match);
+// ── HTML→Markdown converter (preserves structure, maximises context density) ─
 
-  // Compact whitespace
-  md = md.replace(RE_MULTI_NEWLINE, "\n\n");
-
+export function htmlToMarkdown(html: string): string {
+  let md = removeNoise(html);
+  md = convertCodeBlocks(md);
+  md = convertHeadings(md);
+  md = md.replaceAll(RE_TABLE_ROW, convertTableRow);
+  md = convertLinks(md);
+  md = convertInlineFormatting(md);
+  md = convertBlockElements(md);
+  md = stripTags(md);
+  md = decodeEntities(md);
+  md = md.replaceAll(RE_MULTI_NEWLINE, "\n\n");
   return md.trim();
 }

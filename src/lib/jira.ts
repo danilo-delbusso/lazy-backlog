@@ -123,6 +123,42 @@ function parseInline(text: string): AdfNode[] {
   return nodes;
 }
 
+/** Try to parse a heading line into an ADF heading node. */
+function parseHeading(line: string): AdfNode | null {
+  const headingRe = /^(#{1,6})\s+(.+)/;
+  const hm = headingRe.exec(line);
+  if (!hm) return null;
+  return { type: "heading", attrs: { level: hm[1]!.length }, content: parseInline(hm[2]!) };
+}
+
+/** Parse a fenced code block starting at index `i`. Returns the node and the new index. */
+function parseCodeBlock(lines: string[], i: number): { node: AdfNode; next: number } {
+  const lang = lines[i]!.slice(3).trim() || undefined;
+  const codeLines: string[] = [];
+  i++;
+  while (i < lines.length && !lines[i]!.startsWith("```")) {
+    codeLines.push(lines[i]!);
+    i++;
+  }
+  i++;
+  const node = {
+    type: "codeBlock",
+    ...(lang ? { attrs: { language: lang } } : {}),
+    content: [textNode(codeLines.join("\n"))],
+  } as AdfNode;
+  return { node, next: i };
+}
+
+/** Collect consecutive list items matching `pattern` and return a list node. */
+function parseList(lines: string[], i: number, pattern: RegExp, listType: "bulletList" | "orderedList"): { node: AdfNode; next: number } {
+  const items: AdfNode[] = [];
+  while (i < lines.length && pattern.test(lines[i]!)) {
+    items.push({ type: "listItem", content: [paragraph(lines[i]!.replace(pattern, ""))] });
+    i++;
+  }
+  return { node: { type: listType, content: items }, next: i };
+}
+
 /** Convert markdown-ish text to an ADF document node. */
 export function markdownToAdf(md: string): AdfNode {
   const lines = md.split("\n");
@@ -133,9 +169,9 @@ export function markdownToAdf(md: string): AdfNode {
     const line = lines[i]!;
 
     // Headings
-    const hm = line.match(/^(#{1,6})\s+(.+)/);
-    if (hm) {
-      content.push({ type: "heading", attrs: { level: hm[1]!.length }, content: parseInline(hm[2]!) });
+    const heading = parseHeading(line);
+    if (heading) {
+      content.push(heading);
       i++;
       continue;
     }
@@ -149,41 +185,25 @@ export function markdownToAdf(md: string): AdfNode {
 
     // Code block
     if (line.startsWith("```")) {
-      const lang = line.slice(3).trim() || undefined;
-      const codeLines: string[] = [];
-      i++;
-      while (i < lines.length && !lines[i]!.startsWith("```")) {
-        codeLines.push(lines[i]!);
-        i++;
-      }
-      i++;
-      content.push({
-        type: "codeBlock",
-        ...(lang ? { attrs: { language: lang } } : {}),
-        content: [textNode(codeLines.join("\n"))],
-      } as AdfNode);
+      const result = parseCodeBlock(lines, i);
+      content.push(result.node);
+      i = result.next;
       continue;
     }
 
     // Bullet list
     if (/^[-*]\s/.test(line)) {
-      const items: AdfNode[] = [];
-      while (i < lines.length && /^[-*]\s/.test(lines[i]!)) {
-        items.push({ type: "listItem", content: [paragraph(lines[i]!.replace(/^[-*]\s/, ""))] });
-        i++;
-      }
-      content.push({ type: "bulletList", content: items });
+      const result = parseList(lines, i, /^[-*]\s/, "bulletList");
+      content.push(result.node);
+      i = result.next;
       continue;
     }
 
     // Ordered list
     if (/^\d+\.\s/.test(line)) {
-      const items: AdfNode[] = [];
-      while (i < lines.length && /^\d+\.\s/.test(lines[i]!)) {
-        items.push({ type: "listItem", content: [paragraph(lines[i]!.replace(/^\d+\.\s/, ""))] });
-        i++;
-      }
-      content.push({ type: "orderedList", content: items });
+      const result = parseList(lines, i, /^\d+\.\s/, "orderedList");
+      content.push(result.node);
+      i = result.next;
       continue;
     }
 
@@ -229,8 +249,9 @@ async function jiraGet<T>(baseUrl: string, headers: Record<string, string>, path
 
 /** Build Basic auth headers from Atlassian credentials. */
 function authHeaders(email: string, apiToken: string): Record<string, string> {
+  const credentials = `${email}:${apiToken}`;
   return {
-    Authorization: `Basic ${Buffer.from(`${email}:${apiToken}`).toString("base64")}`,
+    Authorization: `Basic ${Buffer.from(credentials).toString("base64")}`,
     Accept: "application/json",
     "Content-Type": "application/json",
   };
@@ -398,16 +419,21 @@ export class JiraClient {
     }
 
     if (input.namedFields) {
-      for (const [fieldName, valueName] of Object.entries(input.namedFields)) {
-        const fs = this.findFieldSchema(fieldName, issueType);
-        if (!fs) continue;
+      this.resolveNamedFields(fields, input.namedFields, issueType);
+    }
+  }
 
-        if (fs.allowedValues?.length) {
-          const match = fs.allowedValues.find((v) => v.name.toLowerCase().includes(valueName.toLowerCase()));
-          if (match) fields[fs.id] = { id: match.id };
-        } else {
-          fields[fs.id] = valueName;
-        }
+  /** Resolve namedFields (display name → value) into custom field IDs. Mutates `fields`. */
+  private resolveNamedFields(fields: Record<string, unknown>, namedFields: Record<string, string>, issueType: string): void {
+    for (const [fieldName, valueName] of Object.entries(namedFields)) {
+      const fs = this.findFieldSchema(fieldName, issueType);
+      if (!fs) continue;
+
+      if (fs.allowedValues?.length) {
+        const match = fs.allowedValues.find((v) => v.name.toLowerCase().includes(valueName.toLowerCase()));
+        if (match) fields[fs.id] = { id: match.id };
+      } else {
+        fields[fs.id] = valueName;
       }
     }
   }
@@ -459,7 +485,10 @@ export class JiraClient {
     const lines = [`## Fields for ${issueType}\n`];
     for (const f of ts.fields) {
       let line = `- **${f.name}** (${f.id}) [${f.type}] — ${f.required ? "**REQUIRED**" : "optional"}`;
-      if (f.allowedValues?.length) line += `\n  Values: ${f.allowedValues.map((v) => `\`${v.name}\``).join(", ")}`;
+      if (f.allowedValues?.length) {
+        const valueList = f.allowedValues.map((v) => `\`${v.name}\``).join(", ");
+        line += `\n  Values: ${valueList}`;
+      }
       lines.push(line);
     }
     return lines.join("\n");
@@ -552,50 +581,70 @@ export class JiraClient {
 
     // Board config + team detection
     if (boardId) {
-      try {
-        const bc = await get<any>(`/rest/agile/1.0/board/${boardId}/configuration`);
-        schema.board = {
-          name: bc.name,
-          type: bc.type,
-          estimationField: bc.estimation?.field?.displayName,
-          columns: bc.columnConfig?.columns?.map((c: any) => ({
-            name: c.name,
-            statuses: c.statuses?.map((s: any) => s.name || s.id),
-          })),
-        };
-
-        // Find team field dynamically from schema fields
-        let teamFieldId: string | null = null;
-        for (const it of schema.issueTypes) {
-          const tf = it.fields.find((f) => f.custom?.toLowerCase().includes("team") || f.name === "Team");
-          if (tf) {
-            teamFieldId = tf.id;
-            break;
-          }
-        }
-
-        // Sample a board ticket to get the team value (no allowedValues in create meta)
-        if (teamFieldId) {
-          try {
-            const board = await get<{ issues?: { fields?: Record<string, any> }[] }>(
-              `/rest/agile/1.0/board/${boardId}/issue?maxResults=1&fields=${teamFieldId}`,
-            );
-            const teamValue = board.issues?.[0]?.fields?.[teamFieldId];
-            if (teamValue?.id) {
-              schema.board.teamFieldId = teamFieldId;
-              schema.board.teamId = teamValue.id;
-              schema.board.teamName = teamValue.name || teamValue.title;
-            }
-          } catch {
-            /* best-effort */
-          }
-        }
-      } catch {
-        /* optional */
-      }
+      await this.discoverBoard(get, schema, boardId);
     }
 
-    // Statuses
+    // Statuses + sample tickets
+    await this.discoverStatusesAndSamples(get, schema, projectKey);
+
+    return schema;
+  }
+
+  /** Discover board configuration and team assignment for a board. */
+  private static async discoverBoard(
+    get: <T>(path: string) => Promise<T>,
+    schema: JiraSchema,
+    boardId: string,
+  ): Promise<void> {
+    try {
+      const bc = await get<any>(`/rest/agile/1.0/board/${boardId}/configuration`);
+      schema.board = {
+        name: bc.name,
+        type: bc.type,
+        estimationField: bc.estimation?.field?.displayName,
+        columns: bc.columnConfig?.columns?.map((c: any) => ({
+          name: c.name,
+          statuses: c.statuses?.map((s: any) => s.name || s.id),
+        })),
+      };
+
+      // Find team field dynamically from schema fields
+      let teamFieldId: string | null = null;
+      for (const it of schema.issueTypes) {
+        const tf = it.fields.find((f) => f.custom?.toLowerCase().includes("team") || f.name === "Team");
+        if (tf) {
+          teamFieldId = tf.id;
+          break;
+        }
+      }
+
+      // Sample a board ticket to get the team value (no allowedValues in create meta)
+      if (teamFieldId) {
+        try {
+          const board = await get<{ issues?: { fields?: Record<string, any> }[] }>(
+            `/rest/agile/1.0/board/${boardId}/issue?maxResults=1&fields=${teamFieldId}`,
+          );
+          const teamValue = board.issues?.[0]?.fields?.[teamFieldId];
+          if (teamValue?.id) {
+            schema.board.teamFieldId = teamFieldId;
+            schema.board.teamId = teamValue.id;
+            schema.board.teamName = teamValue.name || teamValue.title;
+          }
+        } catch {
+          /* best-effort */
+        }
+      }
+    } catch {
+      /* optional */
+    }
+  }
+
+  /** Discover statuses and sample tickets for convention detection. */
+  private static async discoverStatusesAndSamples(
+    get: <T>(path: string) => Promise<T>,
+    schema: JiraSchema,
+    projectKey: string,
+  ): Promise<void> {
     try {
       const statuses = await get<any[]>(`/rest/api/3/project/${projectKey}/statuses`);
       schema.statuses = statuses.map((st) => ({
@@ -606,7 +655,6 @@ export class JiraClient {
       /* optional */
     }
 
-    // Sample tickets for convention detection
     try {
       const jql = `project = ${projectKey} ORDER BY created DESC`;
       const search = await get<{ issues?: any[] }>(
@@ -623,8 +671,6 @@ export class JiraClient {
     } catch {
       /* optional */
     }
-
-    return schema;
   }
 
   // ── Static: Schema persistence ──
@@ -633,7 +679,7 @@ export class JiraClient {
   static loadSchema(schemaPath?: string): JiraSchema | null {
     if (!schemaPath) return null;
     try {
-      return JSON.parse(require("fs").readFileSync(schemaPath, "utf-8")) as JiraSchema;
+      return JSON.parse(require("node:fs").readFileSync(schemaPath, "utf-8")) as JiraSchema;
     } catch {
       return null;
     }

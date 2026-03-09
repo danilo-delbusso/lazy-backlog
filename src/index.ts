@@ -10,7 +10,7 @@ const server = new McpServer({ name: "lazy-backlog", version: "0.1.0" }, { capab
 // Lazy-init knowledge base
 let kb: KnowledgeBase | null = null;
 function getKb(): KnowledgeBase {
-  if (!kb) kb = new KnowledgeBase();
+  kb ??= new KnowledgeBase();
   return kb;
 }
 
@@ -39,7 +39,9 @@ async function main() {
   console.error("Lazy Backlog MCP Server running on stdio");
 }
 
-main().catch((error) => {
+try {
+  await main();
+} catch (error) {
   console.error("Fatal:", error);
   process.exit(1);
-});
+}

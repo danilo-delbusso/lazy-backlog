@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
-import fs from "fs";
-import path from "path";
+import fs from "node:fs";
+import path from "node:path";
 import type { PageType } from "../config/schema.js";
 
 // ── Domain types ───────────────────────────────────────────────────────────
@@ -104,7 +104,7 @@ function ftsQuery<T>(
     return runFilteredQuery<T>(stmts, query, filter, defaultLimit);
   } catch (err) {
     if (err instanceof Error && err.message.includes("fts5")) {
-      return runFilteredQuery<T>(stmts, `"${query.replace(/"/g, '""')}"`, filter, defaultLimit);
+      return runFilteredQuery<T>(stmts, `"${query.replaceAll('"', '""')}"`, filter, defaultLimit);
     }
     throw err;
   }
@@ -113,10 +113,10 @@ function ftsQuery<T>(
 // ── Knowledge base ─────────────────────────────────────────────────────────
 
 export class KnowledgeBase {
-  private db: Database;
-  private stmts!: ReturnType<typeof this.prepareStatements>;
+  private readonly db: Database;
+  private readonly stmts!: ReturnType<typeof this.prepareStatements>;
   // Pre-prepared search variants (avoids dynamic SQL)
-  private searchStmts!: ReturnType<typeof this.prepareSearchVariants>;
+  private readonly searchStmts!: ReturnType<typeof this.prepareSearchVariants>;
 
   constructor(dbPath?: string) {
     const resolvedPath = dbPath || path.join(process.cwd(), ".lazy-backlog", "knowledge.db");

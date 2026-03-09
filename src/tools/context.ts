@@ -30,7 +30,8 @@ export function registerContextTools(server: McpServer, getKb: () => KnowledgeBa
       if (chunks.length > 0) {
         const lines = chunks.map((c, i) => {
           const location = c.breadcrumb || c.heading || c.page_title;
-          return `${i + 1}. **${c.page_title}** › ${location} [${c.page_type}]${c.url ? ` ${c.url}` : ""}\n   ${c.snippet}`;
+          const urlSuffix = c.url ? ` ${c.url}` : "";
+          return `${i + 1}. **${c.page_title}** › ${location} [${c.page_type}]${urlSuffix}\n   ${c.snippet}`;
         });
 
         return textResponse(
@@ -48,9 +49,10 @@ export function registerContextTools(server: McpServer, getKb: () => KnowledgeBa
 
       if (results.length === 0) return textResponse(`No results for "${params.query}".`);
 
-      const lines = results.map(
-        (r, i) => `${i + 1}. **${r.title}** [${r.page_type}]${r.url ? ` ${r.url}` : ""}\n   ${r.snippet}`,
-      );
+      const lines = results.map((r, i) => {
+        const urlSuffix = r.url ? ` ${r.url}` : "";
+        return `${i + 1}. **${r.title}** [${r.page_type}]${urlSuffix}\n   ${r.snippet}`;
+      });
 
       return textResponse(`${results.length} results:\n\n${lines.join("\n\n")}`);
     },
@@ -149,12 +151,12 @@ export function registerContextTools(server: McpServer, getKb: () => KnowledgeBa
   });
 }
 
-function formatSummaryLine(s: PageSummary): string {
-  const preview = s.content_preview.replace(/\n/g, " ").trim();
+export function formatSummaryLine(s: PageSummary): string {
+  const preview = s.content_preview.replaceAll("\n", " ").trim();
   return `- **${s.title}** (${s.space_key}) [${formatLabels(s.labels)}]\n  ${preview}…`;
 }
 
-function appendSection(
+export function appendSection(
   pages: PageSummary[],
   heading: string,
   maxItems: number,

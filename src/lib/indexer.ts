@@ -91,11 +91,11 @@ function isAdrContent(body: string | undefined): boolean {
 // ── Spider with bounded concurrency + incremental sync ─────────────────────
 
 export class Spider {
-  private visited = new Set<string>();
+  private readonly visited = new Set<string>();
 
   constructor(
-    private client: ConfluenceClient,
-    private kb: KnowledgeBase,
+    private readonly client: ConfluenceClient,
+    private readonly kb: KnowledgeBase,
   ) {}
 
   /** Crawl Confluence pages and index them into the knowledge base. Supports both space-wide and subtree crawling. */
@@ -182,6 +182,8 @@ export class Spider {
     options: SpiderOptions,
     onProgress?: (progress: SpiderProgress) => void,
   ): Promise<SpiderResult> {
+    const rootPageId = options.rootPageId;
+    if (!rootPageId) throw new Error("rootPageId is required for tree crawling");
     const result: SpiderResult = { indexed: 0, skipped: 0, unchanged: 0, errors: [] };
     const spaceKey = options.spaceKey || "unknown";
     const maxDepth = options.maxDepth ?? 10;
@@ -203,14 +205,16 @@ export class Spider {
           errors: result.errors.length,
         });
 
-        if (!this.shouldIndex(page, options)) {
-          result.skipped++;
-        } else if (!this.kb.needsReindex(page.id, page.updatedAt)) {
-          result.unchanged++;
+        if (this.shouldIndex(page, options)) {
+          if (this.kb.needsReindex(page.id, page.updatedAt)) {
+            const indexed = toIndexedPage(page, spaceKey);
+            this.flushBatch([indexed]);
+            result.indexed++;
+          } else {
+            result.unchanged++;
+          }
         } else {
-          const indexed = toIndexedPage(page, spaceKey);
-          this.flushBatch([indexed]);
-          result.indexed++;
+          result.skipped++;
         }
 
         const children = await this.client.getPageChildren(pageId);
@@ -225,7 +229,7 @@ export class Spider {
       }
     };
 
-    await crawlRecursive(options.rootPageId!, 0);
+    await crawlRecursive(rootPageId, 0);
     return result;
   }
 

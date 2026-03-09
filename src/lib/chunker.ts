@@ -137,6 +137,62 @@ function splitAtParagraphs(text: string, maxSize: number): string[] {
   return parts;
 }
 
+/** Update heading stack by popping entries at same or deeper level, then pushing the new heading. */
+function updateHeadingStack(
+  stack: { heading: string; depth: number }[],
+  section: RawSection,
+): void {
+  while (stack.length > 0 && stack.at(-1)!.depth >= section.depth) {
+    stack.pop();
+  }
+  if (section.heading) {
+    stack.push({ heading: section.heading, depth: section.depth });
+  }
+}
+
+/** Try to merge a tiny section into the previous chunk. Returns true if merged. */
+function tryMergeTinySection(
+  text: string,
+  section: RawSection,
+  chunks: Chunk[],
+  minChunkSize: number,
+): boolean {
+  if (text.length < minChunkSize && text.length > 0 && chunks.length > 0) {
+    const prev = chunks.at(-1)!;
+    prev.content += `\n\n## ${section.heading}\n${text}`;
+    return true;
+  }
+  return false;
+}
+
+/** Emit one or more chunks from a section's text parts, applying overlap from previous chunk. */
+function emitSectionChunks(
+  textParts: string[],
+  section: RawSection,
+  breadcrumb: string,
+  chunks: Chunk[],
+  prevChunkEnd: string,
+  overlapChars: number,
+): void {
+  for (let i = 0; i < textParts.length; i++) {
+    let content = textParts[i]!;
+
+    if (overlapChars > 0 && prevChunkEnd && chunks.length > 0) {
+      const overlap = prevChunkEnd.slice(-overlapChars);
+      content = `…${overlap}\n\n---\n\n${content}`;
+    }
+
+    chunks.push({
+      breadcrumb,
+      heading: section.heading + (textParts.length > 1 ? ` (${i + 1}/${textParts.length})` : ""),
+      depth: section.depth,
+      content,
+      startOffset: section.startOffset,
+      index: chunks.length,
+    });
+  }
+}
+
 /**
  * Chunk a markdown document into heading-aware sections with breadcrumbs.
  *
@@ -151,13 +207,11 @@ export function chunkMarkdown(markdown: string, options?: ChunkOptions): Chunk[]
   const sections = collectSections(tree);
 
   if (sections.length === 0) {
-    // No structure — return whole document as single chunk
     const text = markdown.trim();
     if (!text) return [];
     return [{ breadcrumb: "", heading: "", depth: 0, content: text, startOffset: 0, index: 0 }];
   }
 
-  // Build breadcrumbs using a heading stack
   const headingStack: { heading: string; depth: number }[] = [];
   const chunks: Chunk[] = [];
   let prevChunkEnd = "";
@@ -165,48 +219,14 @@ export function chunkMarkdown(markdown: string, options?: ChunkOptions): Chunk[]
   for (const section of sections) {
     const text = nodesToText(section.nodes);
 
-    // Update heading stack — pop anything at same or deeper level
-    while (headingStack.length > 0 && headingStack[headingStack.length - 1]!.depth >= section.depth) {
-      headingStack.pop();
-    }
-    if (section.heading) {
-      headingStack.push({ heading: section.heading, depth: section.depth });
-    }
-
+    updateHeadingStack(headingStack, section);
     const breadcrumb = buildBreadcrumb(headingStack);
 
-    // Skip empty sections
     if (!text && !section.heading) continue;
+    if (tryMergeTinySection(text, section, chunks, opts.minChunkSize)) continue;
 
-    // Merge tiny sections — append to previous chunk if possible
-    if (text.length < opts.minChunkSize && text.length > 0 && chunks.length > 0) {
-      const prev = chunks[chunks.length - 1]!;
-      prev.content += `\n\n## ${section.heading}\n${text}`;
-      continue;
-    }
-
-    // Split oversized sections
     const textParts = splitAtParagraphs(text || section.heading, opts.maxChunkSize);
-
-    for (let i = 0; i < textParts.length; i++) {
-      let content = textParts[i]!;
-
-      // Add overlap from previous chunk
-      if (opts.overlapChars > 0 && prevChunkEnd && chunks.length > 0) {
-        const overlap = prevChunkEnd.slice(-opts.overlapChars);
-        content = `…${overlap}\n\n---\n\n${content}`;
-      }
-
-      chunks.push({
-        breadcrumb,
-        heading: section.heading + (textParts.length > 1 ? ` (${i + 1}/${textParts.length})` : ""),
-        depth: section.depth,
-        content,
-        startOffset: section.startOffset,
-        index: chunks.length,
-      });
-    }
-
+    emitSectionChunks(textParts, section, breadcrumb, chunks, prevChunkEnd, opts.overlapChars);
     prevChunkEnd = text;
   }
 
@@ -218,21 +238,21 @@ export function stripBoilerplate(md: string): string {
   return (
     md
       // Page properties macro remnants
-      .replace(/\|?\s*Created by.*?\d{4}\s*\|?/gi, "")
+      .replaceAll(/\|?\s*Created by[^|\n]*\d{4}\s*\|?/gi, "")
       // "Last updated" lines
-      .replace(/Last (updated|modified|edited).*?\n/gi, "")
+      .replaceAll(/Last (updated|modified|edited).*?\n/gi, "")
       // Empty table rows
-      .replace(/\|\s*\|\s*\|\s*\n/g, "")
+      .replaceAll(/\|\s*\|\s*\|\s*\n/g, "")
       // Confluence status macros
-      .replace(/\{status[^}]*\}/gi, "")
+      .replaceAll(/\{status[^}]*\}/gi, "")
       // TOC macros
-      .replace(/\{toc[^}]*\}/gi, "")
+      .replaceAll(/\{toc[^}]*\}/gi, "")
       // Panel/info/warning macro wrappers (keep content)
-      .replace(/\{(panel|info|warning|note|tip|expand)[^}]*\}/gi, "")
+      .replaceAll(/\{(panel|info|warning|note|tip|expand)[^}]*\}/gi, "")
       // Jira issue macro
-      .replace(/\{jira[^}]*\}/gi, "")
+      .replaceAll(/\{jira[^}]*\}/gi, "")
       // Multiple blank lines → max 2
-      .replace(/\n{3,}/g, "\n\n")
+      .replaceAll(/\n{3,}/g, "\n\n")
       .trim()
   );
 }

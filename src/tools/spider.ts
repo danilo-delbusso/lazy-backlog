@@ -46,8 +46,8 @@ export function registerSpiderTools(server: McpServer, getKb: () => KnowledgeBas
       kb.setConfig("atlassian", JSON.stringify(current));
 
       const parts: string[] = [];
-      if (current.jiraProjectKey) parts.push(`Project: ${current.jiraProjectKey}`);
-      if (current.jiraBoardId) parts.push(`Board: ${current.jiraBoardId}`);
+      if (current.jiraProjectKey) parts.push(`Project: ${String(current.jiraProjectKey)}`);
+      if (current.jiraBoardId) parts.push(`Board: ${String(current.jiraBoardId)}`);
       const spaces = (current.confluenceSpaces as string[])?.join(", ");
       if (spaces) parts.push(`Spaces: ${spaces}`);
 
@@ -88,11 +88,12 @@ export function registerSpiderTools(server: McpServer, getKb: () => KnowledgeBas
       }
 
       const stats = kb.getStats();
-      lines.push(`\nKB total: ${stats.total} pages`);
+      const typeBreakdown = Object.entries(stats.byType)
+        .map(([k, v]) => `${k}:${v}`)
+        .join(" ");
       lines.push(
-        `Types: ${Object.entries(stats.byType)
-          .map(([k, v]) => `${k}:${v}`)
-          .join(" ")}`,
+        `\nKB total: ${stats.total} pages`,
+        `Types: ${typeBreakdown}`,
       );
 
       return textResponse(lines.join("\n"));

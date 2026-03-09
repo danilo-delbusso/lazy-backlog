@@ -14,7 +14,9 @@
     "lint": "biome check src/",
     "lint:fix": "biome check --write src/",
     "format": "biome format --write src/",
-    "check": "bun run typecheck && bun run lint"
+    "test": "bun test",
+    "test:coverage": "bun test --coverage --coverage-reporter=lcov --coverage-dir=coverage",
+    "check": "bun run typecheck && bun run lint && bun test"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.6",

@@ -9,7 +9,7 @@ import { JiraClient, type JiraSchema, type JiraTicketInput } from "../lib/jira.j
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 /** Stop words filtered from description when extracting search keywords. */
-const STOP_WORDS = new Set([
+export const STOP_WORDS = new Set([
   "the",
   "a",
   "an",
@@ -156,23 +156,23 @@ Structure every description as:
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /** Zod preprocess: parse JSON strings into native types (handles buggy LLM clients). */
-const jsonPreprocess = <T>(val: unknown): T => (typeof val === "string" ? JSON.parse(val as string) : val) as T;
+const jsonPreprocess = <T>(val: unknown): T => (typeof val === "string" ? JSON.parse(val) : val) as T;
 const boolPreprocess = (val: unknown): boolean => (typeof val === "string" ? val === "true" : val) as boolean;
 
 /** Extract search keywords from a description string. */
-function extractKeywords(text: string): string[] {
+export function extractKeywords(text: string): string[] {
   return [
     ...new Set(
       text
         .split(/[\s,.:;()\-/]+/)
-        .map((w) => w.toLowerCase().replace(/[^a-z0-9]/g, ""))
+        .map((w) => w.toLowerCase().replaceAll(/[^a-z0-9]/g, ""))
         .filter((w) => w.length > 2 && !STOP_WORDS.has(w)),
     ),
   ];
 }
 
 /** Build a JiraClient from the KB config + schema. */
-function buildJiraClient(kb: KnowledgeBase): { jira: JiraClient; config: ReturnType<typeof resolveConfig> } {
+export function buildJiraClient(kb: KnowledgeBase): { jira: JiraClient; config: ReturnType<typeof resolveConfig> } {
   const config = resolveConfig(kb);
   const projectKey = config.jiraProjectKey;
   if (!projectKey) throw new Error("No project key configured. Run the configure tool first.");
@@ -181,7 +181,7 @@ function buildJiraClient(kb: KnowledgeBase): { jira: JiraClient; config: ReturnT
 }
 
 /** Format a schema discovery result into a summary string. */
-function formatSchemaResult(schema: JiraSchema): string {
+export function formatSchemaResult(schema: JiraSchema): string {
   const types = schema.issueTypes.map((t) => t.name).join(", ");
   const fields = schema.issueTypes.reduce((n, t) => n + t.fields.length, 0);
   const lines = [
@@ -232,7 +232,7 @@ async function spiderSpaces(
 }
 
 /** Retrieve deep Confluence context for ticket planning. */
-function retrieveConfluenceContext(kb: KnowledgeBase, description: string, spaceKey?: string) {
+export function retrieveConfluenceContext(kb: KnowledgeBase, description: string, spaceKey?: string) {
   const opts = { spaceKey };
 
   // All ADRs, design docs, specs — always included
@@ -272,10 +272,102 @@ function retrieveConfluenceContext(kb: KnowledgeBase, description: string, space
 }
 
 /** Format page summaries as markdown list items. */
-function formatSummaries(pages: PageSummary[], heading: string): string {
+export function formatSummaries(pages: PageSummary[], heading: string): string {
   if (pages.length === 0) return "";
-  const items = pages.map((p) => `- **${p.title}**: ${p.content_preview.replace(/\n/g, " ").trim()}`).join("\n");
+  const items = pages.map((p) => `- **${p.title}**: ${p.content_preview.replaceAll("\n", " ").trim()}`).join("\n");
   return `### ${heading} (${pages.length} total)\n${items}\n\n`;
+}
+
+/** Build the schema guidance section for the ticket plan. */
+function buildSchemaGuidance(schema: JiraSchema | null, issueType: string): string {
+  if (!schema) return `> No Jira schema found. Run \`setup\` or \`discover-jira\` first.\n\n`;
+
+  let plan = "";
+  if (schema.board) {
+    const estimationSuffix = schema.board.estimationField ? ` — estimates in ${schema.board.estimationField}` : "";
+    plan += `**Board:** ${schema.board.name} (${schema.board.type})${estimationSuffix}\n`;
+    if (schema.board.columns) plan += `**Workflow:** ${schema.board.columns.map((c) => c.name).join(" → ")}\n`;
+  }
+  plan += `**Priorities:** ${schema.priorities.map((p) => p.name).join(", ")}\n`;
+  const typeLabels = schema.issueTypes.map((t) => t.name + (t.subtask ? " [subtask]" : "")).join(", ");
+  plan += `**Issue Types:** ${typeLabels}\n\n`;
+
+  const ts = schema.issueTypes.find((t) => t.name === issueType);
+  if (ts) {
+    plan += `## Fields for ${issueType}\n\n`;
+    for (const f of ts.fields) {
+      const valuesSuffix = f.allowedValues?.length
+        ? ` — values: ${f.allowedValues.map((v) => `\`${v.name}\``).join(", ")}`
+        : "";
+      plan += `- **${f.name}** [${f.required ? "REQUIRED" : "optional"}]${valuesSuffix}\n`;
+    }
+    plan += `\nPass custom fields via \`namedFields\`: \`{"Field Name": "Value Name"}\`\n`;
+    plan += `Required fields with allowed values are auto-filled if not provided.\n\n`;
+  }
+
+  if (schema.sampleTickets?.length) {
+    plan += `## Conventions (from recent tickets)\n`;
+    for (const t of schema.sampleTickets.slice(0, 3)) {
+      plan += `- ${t.key}: "${t.summary}" [${t.type}, ${t.priority}]\n`;
+    }
+    plan += `\n`;
+  }
+
+  return plan;
+}
+
+/** Build the Confluence context section for the ticket plan. */
+function buildConfluenceSection(ctx: ReturnType<typeof retrieveConfluenceContext>): string {
+  let plan = `## Confluence Context\n\n`;
+  plan += `> **IMPORTANT:** You MUST reference relevant ADRs, design docs, and specs in ticket descriptions. Cite specific ADR numbers and technical constraints.\n\n`;
+  plan += formatSummaries(ctx.adrs, "ADRs");
+  plan += formatSummaries(ctx.designs, "Design Docs");
+  plan += formatSummaries(ctx.specs, "Specs");
+
+  if (ctx.chunks.length > 0) {
+    plan += `### Targeted Matches (${ctx.chunks.length} relevant sections)\n`;
+    for (const c of ctx.chunks.slice(0, 25)) {
+      plan += `- **${c.page_title}** › ${c.breadcrumb} [${c.page_type}]: ${c.snippet}\n`;
+    }
+    plan += `\n`;
+  }
+
+  if (!ctx.adrs.length && !ctx.designs.length && !ctx.chunks.length) {
+    plan += `> ⚠ No Confluence context found. Spider a space first.\n\n`;
+  }
+
+  return plan;
+}
+
+/** Build the dry-run context string from Confluence search results. */
+function buildDryRunContext(
+  chunks: Array<{ page_title: string; page_type: string; breadcrumb?: string; heading?: string; snippet: string }>,
+  fallback: Array<{ title: string; page_type: string; snippet: string }>,
+): string {
+  if (chunks.length > 0) {
+    const items = chunks
+      .map((c) => {
+        const location = c.breadcrumb || c.heading || "";
+        return `- **${c.page_title}** › ${location} [${c.page_type}]\n  ${c.snippet}`;
+      })
+      .join("\n");
+    return (
+      `\n\n## Relevant Confluence Context\n` +
+      items +
+      `\n\n> Review context above. Refine descriptions before setting dryRun=false.\n`
+    );
+  }
+
+  if (fallback.length > 0) {
+    const items = fallback.map((r) => `- **${r.title}** [${r.page_type}]: ${r.snippet}`).join("\n");
+    return (
+      `\n\n## Relevant Confluence Context\n` +
+      items +
+      `\n\n> Review context above. Refine descriptions before setting dryRun=false.\n`
+    );
+  }
+
+  return `\n\n> ⚠ No Confluence context found. Run 'search' to ground these tickets.\n`;
 }
 
 // ── Tool Registration ─────────────────────────────────────────────────────────
@@ -389,58 +481,8 @@ export function registerTicketTools(server: McpServer, getKb: () => KnowledgeBas
       plan += `**Feature:** ${params.description}\n`;
       plan += `**Default Type:** ${params.issueType} | **KB:** ${stats.total} pages indexed\n\n`;
 
-      // Schema guidance
-      if (schema) {
-        if (schema.board) {
-          plan += `**Board:** ${schema.board.name} (${schema.board.type})`;
-          if (schema.board.estimationField) plan += ` — estimates in ${schema.board.estimationField}`;
-          plan += `\n`;
-          if (schema.board.columns) plan += `**Workflow:** ${schema.board.columns.map((c) => c.name).join(" → ")}\n`;
-        }
-        plan += `**Priorities:** ${schema.priorities.map((p) => p.name).join(", ")}\n`;
-        plan += `**Issue Types:** ${schema.issueTypes.map((t) => t.name + (t.subtask ? " [subtask]" : "")).join(", ")}\n\n`;
-
-        const ts = schema.issueTypes.find((t) => t.name === params.issueType);
-        if (ts) {
-          plan += `## Fields for ${params.issueType}\n\n`;
-          for (const f of ts.fields) {
-            plan += `- **${f.name}** [${f.required ? "REQUIRED" : "optional"}]`;
-            if (f.allowedValues?.length) plan += ` — values: ${f.allowedValues.map((v) => `\`${v.name}\``).join(", ")}`;
-            plan += `\n`;
-          }
-          plan += `\nPass custom fields via \`namedFields\`: \`{"Field Name": "Value Name"}\`\n`;
-          plan += `Required fields with allowed values are auto-filled if not provided.\n\n`;
-        }
-
-        if (schema.sampleTickets?.length) {
-          plan += `## Conventions (from recent tickets)\n`;
-          for (const t of schema.sampleTickets.slice(0, 3)) {
-            plan += `- ${t.key}: "${t.summary}" [${t.type}, ${t.priority}]\n`;
-          }
-          plan += `\n`;
-        }
-      } else {
-        plan += `> No Jira schema found. Run \`setup\` or \`discover-jira\` first.\n\n`;
-      }
-
-      // Confluence context
-      plan += `## Confluence Context\n\n`;
-      plan += `> **IMPORTANT:** You MUST reference relevant ADRs, design docs, and specs in ticket descriptions. Cite specific ADR numbers and technical constraints.\n\n`;
-      plan += formatSummaries(ctx.adrs, "ADRs");
-      plan += formatSummaries(ctx.designs, "Design Docs");
-      plan += formatSummaries(ctx.specs, "Specs");
-
-      if (ctx.chunks.length > 0) {
-        plan += `### Targeted Matches (${ctx.chunks.length} relevant sections)\n`;
-        for (const c of ctx.chunks.slice(0, 25)) {
-          plan += `- **${c.page_title}** › ${c.breadcrumb} [${c.page_type}]: ${c.snippet}\n`;
-        }
-        plan += `\n`;
-      }
-
-      if (!ctx.adrs.length && !ctx.designs.length && !ctx.chunks.length) {
-        plan += `> ⚠ No Confluence context found. Spider a space first.\n\n`;
-      }
+      plan += buildSchemaGuidance(schema, params.issueType);
+      plan += buildConfluenceSection(ctx);
 
       plan += `---\nUse **create-tickets** with a tickets array. Set dryRun=true to preview first.\n`;
       plan += FIELD_RULES;
@@ -505,36 +547,24 @@ export function registerTicketTools(server: McpServer, getKb: () => KnowledgeBas
         const fallback = chunks.length === 0 ? kb.search(keywords, { limit: 5 }) : [];
 
         const lines = params.tickets.map((t, i) => {
+          const componentsList = t.components.join(",");
           const meta = [
             t.issueType,
             t.priority,
             t.storyPoints != null ? `${t.storyPoints}pts` : "",
             t.labels.length ? t.labels.join(",") : "",
             t.parentKey ? `parent: ${t.parentKey}` : "",
-            t.components.length ? `components: ${t.components.join(",")}` : "",
+            t.components.length ? `components: ${componentsList}` : "",
           ].filter(Boolean);
           return `${i + 1}. **${t.summary}** [${meta.join(" | ")}]\n${t.description || "(no description)"}`;
         });
 
-        let ctx = "";
-        if (chunks.length > 0) {
-          ctx =
-            `\n\n## Relevant Confluence Context\n` +
-            chunks
-              .map((c) => `- **${c.page_title}** › ${c.breadcrumb || c.heading || ""} [${c.page_type}]\n  ${c.snippet}`)
-              .join("\n") +
-            `\n\n> Review context above. Refine descriptions before setting dryRun=false.\n`;
-        } else if (fallback.length > 0) {
-          ctx =
-            `\n\n## Relevant Confluence Context\n` +
-            fallback.map((r) => `- **${r.title}** [${r.page_type}]: ${r.snippet}`).join("\n") +
-            `\n\n> Review context above. Refine descriptions before setting dryRun=false.\n`;
-        } else {
-          ctx = `\n\n> ⚠ No Confluence context found. Run 'search' to ground these tickets.\n`;
-        }
+        const ctx = buildDryRunContext(chunks, fallback);
+        const ticketCount = params.tickets.length;
+        const plural = ticketCount === 1 ? "" : "s";
 
         return textResponse(
-          `# Preview: ${params.tickets.length} ticket${params.tickets.length === 1 ? "" : "s"}\n` +
+          `# Preview: ${ticketCount} ticket${plural}\n` +
             `Project: ${projectKey || "(not set)"}\n\n` +
             lines.join("\n\n---\n\n") +
             ctx +
@@ -560,7 +590,9 @@ export function registerTicketTools(server: McpServer, getKb: () => KnowledgeBas
       }));
 
       const result = await jira.createIssuesBatch(inputs);
-      let out = `# Created ${result.issues.length}/${params.tickets.length} ticket${params.tickets.length === 1 ? "" : "s"}\n\n`;
+      const totalTickets = params.tickets.length;
+      const plural = totalTickets === 1 ? "" : "s";
+      let out = `# Created ${result.issues.length}/${totalTickets} ticket${plural}\n\n`;
       for (const issue of result.issues) out += `- **${issue.key}** — ${config.siteUrl}/browse/${issue.key}\n`;
       if (result.errors.length > 0) {
         out += `\n## Errors (${result.errors.length})\n`;
@@ -645,8 +677,9 @@ export function registerTicketTools(server: McpServer, getKb: () => KnowledgeBas
           params.namedFields && `Custom fields: ${Object.keys(params.namedFields).join(", ")}`,
           params.comment && "Comment: added",
         ].filter(Boolean);
+        const changesList = changes.map((c) => `- ${c}`).join("\n");
         return textResponse(
-          `Updated **${params.issueKey}** — ${url}\n\nChanges:\n${changes.map((c) => `- ${c}`).join("\n")}`,
+          `Updated **${params.issueKey}** — ${url}\n\nChanges:\n${changesList}`,
         );
       } catch (err) {
         return errorResponse(
