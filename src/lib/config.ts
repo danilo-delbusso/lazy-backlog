@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { ProjectConfig } from "../config/schema.js";
 import type { KnowledgeBase } from "./db.js";
+import { JiraClient } from "./jira.js";
 
 /** Schema for the stored (non-auth) project settings in SQLite. */
 const StoredConfigSchema = z.object({
@@ -51,6 +52,24 @@ function parseStoredConfig(raw: string | undefined) {
   } catch {
     return {};
   }
+}
+
+/** Build a JiraClient from the KB config + schema. Throws if setup has not been run. */
+export function buildJiraClient(kb: KnowledgeBase): { jira: JiraClient; config: ProjectConfig } {
+  const config = resolveConfig(kb);
+  const projectKey = config.jiraProjectKey;
+  if (!projectKey) {
+    throw new Error(
+      "Project not set up. Run: configure action='setup' to initialize Jira schema and Confluence indexing.",
+    );
+  }
+  const schema = JiraClient.loadSchemaFromDb(kb);
+  if (!schema) {
+    throw new Error(
+      "Jira schema not discovered. Run: configure action='setup' to initialize Jira schema and Confluence indexing.",
+    );
+  }
+  return { jira: new JiraClient({ ...config, jiraProjectKey: projectKey }, schema), config };
 }
 
 /** Helper to return MCP error response. */

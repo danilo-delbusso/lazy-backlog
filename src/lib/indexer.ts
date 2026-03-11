@@ -161,7 +161,7 @@ export class Spider {
 
           batch.push(toIndexedPage(fullPage, spaceKey));
           result.indexed++;
-        } catch (err) {
+        } catch (err: unknown) {
           result.errors.push(`${page.id} (${page.title}): ${err}`);
         }
       });
@@ -225,7 +225,7 @@ export class Spider {
           const chunk = children.slice(i, i + concurrency);
           await Promise.all(chunk.map((child) => crawlRecursive(child.id, depth + 1)));
         }
-      } catch (err) {
+      } catch (err: unknown) {
         result.errors.push(`${pageId}: ${err}`);
       }
     };

@@ -1,349 +1,65 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { PageType } from "../config/schema.js";
-import { Database, type SqliteDatabase, type Statement } from "./sqlite.js";
+import { configurePragmas, initSchema, type PreparedStatements, prepareStatements } from "./db-schema.js";
+import { prepareSearchVariants, type SearchStatements, searchChunks, searchPages } from "./db-search.js";
+import type {
+  BacklogAnalysisRecord,
+  CachedChangelogEntry,
+  CachedSprint,
+  ChunkSearchResult,
+  IndexedPage,
+  PageSummary,
+  SearchFilter,
+  SearchResult,
+  StoredTeamRule,
+} from "./db-types.js";
+import { Database, type SqliteDatabase } from "./sqlite.js";
 
-// ── Domain types ───────────────────────────────────────────────────────────
+export * from "./db-search.js";
+export * from "./db-types.js";
+export { groupBy } from "./utils.js";
 
-export interface IndexedPage {
-  id: string;
-  space_key: string;
-  title: string;
-  url: string | null;
-  content: string;
-  page_type: PageType;
-  labels: string; // JSON array
-  parent_id: string | null;
-  author_id: string | null;
-  created_at: string | null;
-  updated_at: string | null;
-  indexed_at: string;
-}
-
-/** Lightweight projection — no content body. */
-export interface PageSummary {
-  id: string;
-  space_key: string;
-  title: string;
-  url: string | null;
-  page_type: PageType;
-  labels: string;
-  updated_at: string | null;
-  content_preview: string;
-}
-
-export interface SearchResult {
-  id: string;
-  space_key: string;
-  title: string;
-  url: string | null;
-  snippet: string;
-  page_type: PageType;
-  labels: string;
-  rank: number;
-}
-
-export interface ChunkSearchResult {
-  chunk_id: number;
-  page_id: string;
-  breadcrumb: string;
-  heading: string;
-  depth: number;
-  space_key: string;
-  page_title: string;
-  url: string | null;
-  page_type: PageType;
-  labels: string;
-  snippet: string;
-  rank: number;
-}
+/** Size threshold (100 MB) above which optimize() will also VACUUM. */
+const VACUUM_THRESHOLD_BYTES = 100 * 1024 * 1024;
 
 interface CountRow {
   count: number;
 }
-
 interface ConfigRow {
   value: string;
 }
-
-/** Filter options shared by page and chunk search. */
-export interface SearchFilter {
-  pageType?: string;
-  spaceKey?: string;
-  limit?: number;
+interface StatsRow {
+  group_type: string;
+  key: string;
+  count: number;
 }
-
-/** Pick the correct pre-prepared statement variant and bind params. */
-function runFilteredQuery<T>(
-  stmts: { none: Statement; type: Statement; space: Statement; both: Statement },
-  query: string,
-  filter: SearchFilter,
-  defaultLimit: number,
-): T[] {
-  const limit = filter.limit || defaultLimit;
-  if (filter.pageType && filter.spaceKey) {
-    return stmts.both.all(query, filter.pageType, filter.spaceKey, limit) as T[];
-  }
-  if (filter.pageType) {
-    return stmts.type.all(query, filter.pageType, limit) as T[];
-  }
-  if (filter.spaceKey) {
-    return stmts.space.all(query, filter.spaceKey, limit) as T[];
-  }
-  return stmts.none.all(query, limit) as T[];
-}
-
-/** Execute an FTS5 query with automatic fallback to phrase escaping on syntax errors. */
-function ftsQuery<T>(
-  query: string,
-  filter: SearchFilter,
-  defaultLimit: number,
-  stmts: { none: Statement; type: Statement; space: Statement; both: Statement },
-): T[] {
-  try {
-    return runFilteredQuery<T>(stmts, query, filter, defaultLimit);
-  } catch (err) {
-    if (err instanceof Error && err.message.includes("fts5")) {
-      return runFilteredQuery<T>(stmts, `"${query.replaceAll('"', '""')}"`, filter, defaultLimit);
-    }
-    throw err;
-  }
+interface UpdatedAtRow {
+  id: string;
+  updated_at: string | null;
 }
 
 // ── Knowledge base ─────────────────────────────────────────────────────────
 
 export class KnowledgeBase {
   private readonly db: SqliteDatabase;
-  private readonly stmts!: ReturnType<typeof this.prepareStatements>;
-  // Pre-prepared search variants (avoids dynamic SQL)
-  private readonly searchStmts!: ReturnType<typeof this.prepareSearchVariants>;
+  private readonly dbPath: string;
+  private readonly stmts: PreparedStatements;
+  private readonly searchStmts: SearchStatements;
 
   constructor(dbPath?: string) {
     const resolvedPath = dbPath || path.join(process.cwd(), ".lazy-backlog", "knowledge.db");
+    this.dbPath = resolvedPath;
     const dir = path.dirname(resolvedPath);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
 
     this.db = new Database(resolvedPath);
-    this.configurePragmas();
-    this.initSchema();
-    this.stmts = this.prepareStatements();
-    this.searchStmts = this.prepareSearchVariants();
-  }
-
-  private configurePragmas() {
-    this.db.exec("PRAGMA journal_mode = WAL");
-    this.db.exec("PRAGMA synchronous = NORMAL"); // Safe with WAL, 2x faster than FULL
-    this.db.exec("PRAGMA foreign_keys = ON");
-    this.db.exec("PRAGMA cache_size = -64000"); // 64MB cache for bulk indexing
-    this.db.exec("PRAGMA mmap_size = 268435456"); // 256MB memory-mapped I/O
-    this.db.exec("PRAGMA temp_store = MEMORY");
-  }
-
-  private initSchema() {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS pages (
-        id TEXT PRIMARY KEY,
-        space_key TEXT NOT NULL,
-        title TEXT NOT NULL,
-        url TEXT,
-        content TEXT NOT NULL,
-        page_type TEXT NOT NULL DEFAULT 'other',
-        labels TEXT NOT NULL DEFAULT '[]',
-        parent_id TEXT,
-        author_id TEXT,
-        created_at TEXT,
-        updated_at TEXT,
-        indexed_at TEXT NOT NULL
-      ) STRICT
-    `);
-
-    this.db.exec("CREATE INDEX IF NOT EXISTS idx_pages_space ON pages(space_key)");
-    this.db.exec("CREATE INDEX IF NOT EXISTS idx_pages_type ON pages(page_type)");
-    this.db.exec("CREATE INDEX IF NOT EXISTS idx_pages_space_type ON pages(space_key, page_type)");
-    this.db.exec("CREATE INDEX IF NOT EXISTS idx_pages_updated ON pages(updated_at)");
-
-    // ── Chunks table: section-level content with heading breadcrumbs ──
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS chunks (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        page_id TEXT NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
-        breadcrumb TEXT NOT NULL DEFAULT '',
-        heading TEXT NOT NULL DEFAULT '',
-        depth INTEGER NOT NULL DEFAULT 0,
-        content TEXT NOT NULL,
-        chunk_index INTEGER NOT NULL DEFAULT 0
-      ) STRICT
-    `);
-
-    this.db.exec("CREATE INDEX IF NOT EXISTS idx_chunks_page ON chunks(page_id)");
-
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS config (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-      ) STRICT
-    `);
-
-    // ── FTS5 on pages (kept for backward compat) ──
-    this.db.exec(`
-      CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts USING fts5(
-        title,
-        content,
-        labels,
-        content='pages',
-        content_rowid='rowid'
-      )
-    `);
-
-    this.db.exec(`
-      CREATE TRIGGER IF NOT EXISTS pages_ai AFTER INSERT ON pages BEGIN
-        INSERT INTO pages_fts(rowid, title, content, labels)
-        VALUES (new.rowid, new.title, new.content, new.labels);
-      END
-    `);
-
-    this.db.exec(`
-      CREATE TRIGGER IF NOT EXISTS pages_ad AFTER DELETE ON pages BEGIN
-        INSERT INTO pages_fts(pages_fts, rowid, title, content, labels)
-        VALUES ('delete', old.rowid, old.title, old.content, old.labels);
-      END
-    `);
-
-    this.db.exec(`
-      CREATE TRIGGER IF NOT EXISTS pages_au AFTER UPDATE ON pages BEGIN
-        INSERT INTO pages_fts(pages_fts, rowid, title, content, labels)
-        VALUES ('delete', old.rowid, old.title, old.content, old.labels);
-        INSERT INTO pages_fts(rowid, title, content, labels)
-        VALUES (new.rowid, new.title, new.content, new.labels);
-      END
-    `);
-
-    // ── FTS5 on chunks (primary search target) ──
-    this.db.exec(`
-      CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-        heading,
-        breadcrumb,
-        content,
-        content='chunks',
-        content_rowid='id'
-      )
-    `);
-
-    this.db.exec(`
-      CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
-        INSERT INTO chunks_fts(rowid, heading, breadcrumb, content)
-        VALUES (new.id, new.heading, new.breadcrumb, new.content);
-      END
-    `);
-
-    this.db.exec(`
-      CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
-        INSERT INTO chunks_fts(chunks_fts, rowid, heading, breadcrumb, content)
-        VALUES ('delete', old.id, old.heading, old.breadcrumb, old.content);
-      END
-    `);
-
-    this.db.exec(`
-      CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
-        INSERT INTO chunks_fts(chunks_fts, rowid, heading, breadcrumb, content)
-        VALUES ('delete', old.id, old.heading, old.breadcrumb, old.content);
-        INSERT INTO chunks_fts(rowid, heading, breadcrumb, content)
-        VALUES (new.id, new.heading, new.breadcrumb, new.content);
-      END
-    `);
-  }
-
-  private prepareStatements() {
-    return {
-      upsert: this.db.prepare(
-        `INSERT INTO pages (id, space_key, title, url, content, page_type, labels, parent_id, author_id, created_at, updated_at, indexed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET
-           space_key=excluded.space_key, title=excluded.title, url=excluded.url,
-           content=excluded.content, page_type=excluded.page_type, labels=excluded.labels,
-           parent_id=excluded.parent_id, author_id=excluded.author_id,
-           created_at=excluded.created_at, updated_at=excluded.updated_at,
-           indexed_at=excluded.indexed_at`,
-      ),
-      getById: this.db.prepare("SELECT * FROM pages WHERE id = ?"),
-      getByType: this.db.prepare("SELECT * FROM pages WHERE page_type = ? ORDER BY title"),
-      getByTypeAndSpace: this.db.prepare("SELECT * FROM pages WHERE page_type = ? AND space_key = ? ORDER BY title"),
-      // Lightweight queries — no content body, just preview
-      summariesByType: this.db.prepare(
-        `SELECT id, space_key, title, url, page_type, labels, updated_at,
-         substr(content, 1, 300) as content_preview
-         FROM pages WHERE page_type = ? ORDER BY title`,
-      ),
-      summariesByTypeAndSpace: this.db.prepare(
-        `SELECT id, space_key, title, url, page_type, labels, updated_at,
-         substr(content, 1, 300) as content_preview
-         FROM pages WHERE page_type = ? AND space_key = ? ORDER BY title`,
-      ),
-      // Stats in a single query
-      stats: this.db.prepare(`
-        SELECT
-          'total' as group_type, 'all' as key, COUNT(*) as count FROM pages
-        UNION ALL
-        SELECT 'type', page_type, COUNT(*) FROM pages GROUP BY page_type
-        UNION ALL
-        SELECT 'space', space_key, COUNT(*) FROM pages GROUP BY space_key
-        UNION ALL
-        SELECT 'chunks', 'all', COUNT(*) FROM chunks
-      `),
-      getConfig: this.db.prepare("SELECT value FROM config WHERE key = ?"),
-      setConfig: this.db.prepare(
-        "INSERT INTO config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-      ),
-      deleteBySpace: this.db.prepare("DELETE FROM pages WHERE space_key = ?"),
-      countBySpaceKey: this.db.prepare("SELECT COUNT(*) as count FROM pages WHERE space_key = ?"),
-      getUpdatedAt: this.db.prepare("SELECT id, updated_at FROM pages WHERE id = ?"),
-      // Chunk statements
-      insertChunk: this.db.prepare(
-        `INSERT INTO chunks (page_id, breadcrumb, heading, depth, content, chunk_index)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      ),
-      deleteChunksByPage: this.db.prepare("DELETE FROM chunks WHERE page_id = ?"),
-      getChunksByPage: this.db.prepare("SELECT * FROM chunks WHERE page_id = ? ORDER BY chunk_index"),
-    };
-  }
-
-  /** Pre-prepare all 4 search filter combinations to avoid dynamic SQL. */
-  private prepareSearchVariants() {
-    // Page-level search (legacy, still useful for title/label matching)
-    const pageBase = (filters: string) => `
-      SELECT p.id, p.space_key, p.title, p.url, p.page_type, p.labels,
-        snippet(pages_fts, 1, '**', '**', '…', 48) AS snippet, rank
-      FROM pages_fts
-      JOIN pages p ON p.rowid = pages_fts.rowid
-      WHERE pages_fts MATCH ?${filters}
-      ORDER BY rank LIMIT ?
-    `;
-
-    // Chunk-level search (primary — returns focused sections with breadcrumbs)
-    const chunkBase = (filters: string) => `
-      SELECT c.id as chunk_id, c.page_id, c.breadcrumb, c.heading, c.depth,
-        p.space_key, p.title as page_title, p.url, p.page_type, p.labels,
-        snippet(chunks_fts, 2, '**', '**', '…', 48) AS snippet, rank
-      FROM chunks_fts
-      JOIN chunks c ON c.id = chunks_fts.rowid
-      JOIN pages p ON p.id = c.page_id
-      WHERE chunks_fts MATCH ?${filters}
-      ORDER BY rank LIMIT ?
-    `;
-
-    return {
-      none: this.db.prepare(pageBase("")),
-      type: this.db.prepare(pageBase(" AND p.page_type = ?")),
-      space: this.db.prepare(pageBase(" AND p.space_key = ?")),
-      both: this.db.prepare(pageBase(" AND p.page_type = ? AND p.space_key = ?")),
-      // Chunk variants
-      chunkNone: this.db.prepare(chunkBase("")),
-      chunkType: this.db.prepare(chunkBase(" AND p.page_type = ?")),
-      chunkSpace: this.db.prepare(chunkBase(" AND p.space_key = ?")),
-      chunkBoth: this.db.prepare(chunkBase(" AND p.page_type = ? AND p.space_key = ?")),
-    };
+    configurePragmas(this.db);
+    initSchema(this.db);
+    this.stmts = prepareStatements(this.db);
+    this.searchStmts = prepareSearchVariants(this.db);
   }
 
   /** Insert or update a single page in the knowledge base. */
@@ -375,7 +91,8 @@ export class KnowledgeBase {
 
   /** Check if a page needs re-indexing based on updated_at timestamp. */
   needsReindex(pageId: string, remoteUpdatedAt: string | undefined): boolean {
-    const row = this.stmts.getUpdatedAt.get(pageId) as { updated_at: string | null } | undefined;
+    // Cast needed: Statement.get() returns unknown; row shape matches our SELECT columns
+    const row = this.stmts.getUpdatedAt.get(pageId) as UpdatedAtRow | undefined;
     if (!row) return true; // Not indexed yet
     if (!remoteUpdatedAt) return true; // Can't compare, re-index to be safe
     return row.updated_at !== remoteUpdatedAt;
@@ -383,12 +100,12 @@ export class KnowledgeBase {
 
   /** Full-text search across indexed pages. Falls back to phrase escaping on FTS5 syntax errors. */
   search(query: string, options?: SearchFilter): SearchResult[] {
-    const { none, type, space, both } = this.searchStmts;
-    return ftsQuery<SearchResult>(query, options ?? {}, 10, { none, type, space, both });
+    return searchPages(query, options ?? {}, this.searchStmts);
   }
 
   /** Retrieve a single page by Confluence page ID. */
   getPage(id: string): IndexedPage | undefined {
+    // Cast needed: Statement.get() returns unknown; row matches SELECT * FROM pages
     return this.stmts.getById.get(id) as IndexedPage | undefined;
   }
 
@@ -410,7 +127,8 @@ export class KnowledgeBase {
 
   /** Get aggregate stats: total pages, breakdown by type and space. */
   getStats(): { total: number; byType: Record<string, number>; bySpace: Record<string, number> } {
-    const rows = this.stmts.stats.all() as { group_type: string; key: string; count: number }[];
+    // Cast needed: Statement.all() returns unknown[]; row shape matches our UNION ALL query
+    const rows = this.stmts.stats.all() as StatsRow[];
     let total = 0;
     const byType: Record<string, number> = {};
     const bySpace: Record<string, number> = {};
@@ -426,6 +144,7 @@ export class KnowledgeBase {
 
   /** Read a config value from the key-value store. */
   getConfig(key: string): string | undefined {
+    // Cast needed: Statement.get() returns unknown; row shape matches SELECT value FROM config
     const row = this.stmts.getConfig.get(key) as ConfigRow | undefined;
     return row?.value;
   }
@@ -437,6 +156,7 @@ export class KnowledgeBase {
 
   /** Delete all pages in a space. Returns the count of deleted pages. */
   clearSpace(spaceKey: string): number {
+    // Cast needed: Statement.get() returns unknown; row is SELECT COUNT(*) as count
     const count = (this.stmts.countBySpaceKey.get(spaceKey) as CountRow).count;
     this.stmts.deleteBySpace.run(spaceKey);
     return count;
@@ -457,8 +177,182 @@ export class KnowledgeBase {
 
   /** Search chunks — returns focused sections with heading breadcrumbs. */
   searchChunks(query: string, options?: SearchFilter): ChunkSearchResult[] {
-    const { chunkNone: none, chunkType: type, chunkSpace: space, chunkBoth: both } = this.searchStmts;
-    return ftsQuery<ChunkSearchResult>(query, options ?? {}, 5, { none, type, space, both });
+    return searchChunks(query, options ?? {}, this.searchStmts);
+  }
+
+  // ── Sprint methods ──
+
+  /** Insert or update a single sprint. */
+  upsertSprint(sprint: CachedSprint): void {
+    this.stmts.upsertSprint.run(
+      sprint.id,
+      sprint.board_id,
+      sprint.name,
+      sprint.state,
+      sprint.goal,
+      sprint.start_date,
+      sprint.end_date,
+      sprint.complete_date,
+      sprint.cached_at,
+    );
+  }
+
+  /** Batch upsert sprints in a single transaction. */
+  upsertSprints(sprints: CachedSprint[]): void {
+    this.db.transaction(() => {
+      for (const sprint of sprints) {
+        this.upsertSprint(sprint);
+      }
+    })();
+  }
+
+  /** Retrieve a sprint by ID. */
+  getSprint(id: string): CachedSprint | undefined {
+    return this.stmts.getSprintById.get(id) as CachedSprint | undefined;
+  }
+
+  /** Get sprints for a board, optionally filtered by state. */
+  getSprintsByBoard(boardId: string, state?: string): CachedSprint[] {
+    if (state) {
+      return this.stmts.getSprintsByBoardAndState.all(boardId, state) as CachedSprint[];
+    }
+    return this.stmts.getSprintsByBoard.all(boardId) as CachedSprint[];
+  }
+
+  // ── Changelog methods ──
+
+  /** Batch upsert changelog entries in a transaction. */
+  upsertChangelog(entries: CachedChangelogEntry[]): void {
+    this.db.transaction(() => {
+      for (const entry of entries) {
+        this.stmts.insertChangelog.run(
+          entry.id,
+          entry.issue_key,
+          entry.author_name,
+          entry.author_id,
+          entry.created,
+          entry.field,
+          entry.from_value,
+          entry.to_value,
+          entry.cached_at,
+        );
+      }
+    })();
+  }
+
+  /** Get all changelog entries for an issue, sorted by created date. */
+  getChangelog(issueKey: string): CachedChangelogEntry[] {
+    return this.stmts.getChangelogByIssue.all(issueKey) as CachedChangelogEntry[];
+  }
+
+  /** Get changelog entries for an issue filtered by field name. */
+  getChangelogByField(issueKey: string, field: string): CachedChangelogEntry[] {
+    return this.stmts.getChangelogByIssueAndField.all(issueKey, field) as CachedChangelogEntry[];
+  }
+
+  /** Remove all changelog entries for an issue. */
+  clearChangelogForIssue(issueKey: string): void {
+    this.stmts.deleteChangelogByIssue.run(issueKey);
+  }
+
+  // ── Stale/recent page queries ──
+
+  /** Get pages with updated_at older than cutoff, optionally filtered. */
+  getStalePages(cutoffDate: string, opts?: { spaceKey?: string; pageType?: string }): IndexedPage[] {
+    if (opts?.pageType && opts?.spaceKey) {
+      return this.stmts.getStalePagesAll.all(cutoffDate, opts.pageType, opts.spaceKey) as IndexedPage[];
+    }
+    if (opts?.pageType) {
+      return this.stmts.getStalePagesTyped.all(cutoffDate, opts.pageType) as IndexedPage[];
+    }
+    if (opts?.spaceKey) {
+      return this.stmts.getStalePagesFiltered.all(cutoffDate, opts.spaceKey) as IndexedPage[];
+    }
+    return this.stmts.getStalePages.all(cutoffDate) as IndexedPage[];
+  }
+
+  /** Get pages indexed after the given timestamp. */
+  getRecentlyIndexed(since: string): IndexedPage[] {
+    return this.stmts.getRecentlyIndexed.all(since) as IndexedPage[];
+  }
+
+  // ── Team rules methods ──
+
+  /** Insert or update a single team rule. */
+  upsertTeamRule(rule: {
+    category: string;
+    rule_key: string;
+    issue_type: string | null;
+    rule_value: string;
+    confidence: number;
+    sample_size: number;
+  }): void {
+    this.stmts.upsertTeamRule.run(
+      rule.category,
+      rule.rule_key,
+      rule.issue_type,
+      rule.rule_value,
+      rule.confidence,
+      rule.sample_size,
+      new Date().toISOString(),
+    );
+  }
+
+  /** Batch upsert team rules in a single transaction. */
+  upsertTeamRules(
+    rules: Array<{
+      category: string;
+      rule_key: string;
+      issue_type: string | null;
+      rule_value: string;
+      confidence: number;
+      sample_size: number;
+    }>,
+  ): void {
+    this.db.transaction(() => {
+      for (const rule of rules) {
+        this.upsertTeamRule(rule);
+      }
+    })();
+  }
+
+  /** Query team rules with optional filters. */
+  getTeamRules(category?: string, issueType?: string): StoredTeamRule[] {
+    if (category && issueType) {
+      return this.stmts.getTeamRulesByCategoryAndType.all(category, issueType) as StoredTeamRule[];
+    }
+    if (category) {
+      return this.stmts.getTeamRulesByCategory.all(category) as StoredTeamRule[];
+    }
+    if (issueType) {
+      return this.stmts.getTeamRulesByIssueType.all(issueType) as StoredTeamRule[];
+    }
+    return this.stmts.getAllTeamRules.all() as StoredTeamRule[];
+  }
+
+  /** Delete all team rules (for re-analysis). */
+  clearTeamRules(): void {
+    this.stmts.deleteAllTeamRules.run();
+  }
+
+  // ── Backlog analysis methods ──
+
+  /** Get the most recent backlog analysis record. */
+  getLatestAnalysis(): BacklogAnalysisRecord | null {
+    return (this.stmts.getLatestAnalysis.get() as BacklogAnalysisRecord) ?? null;
+  }
+
+  /** Record a backlog analysis run. */
+  recordAnalysis(record: Omit<BacklogAnalysisRecord, "id">): void {
+    this.stmts.insertAnalysis.run(
+      record.project_key,
+      record.tickets_fetched,
+      record.tickets_quality_passed,
+      record.quality_threshold,
+      record.rules_extracted,
+      record.jql_used,
+      record.analyzed_at,
+    );
   }
 
   rebuildFts(): void {
@@ -476,9 +370,29 @@ export class KnowledgeBase {
     })();
   }
 
+  /** Return the database file size in bytes, or 0 if the file doesn't exist. */
+  getDbSizeBytes(): number {
+    try {
+      return fs.statSync(this.dbPath).size;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Run PRAGMA optimize (always) and VACUUM (only when DB > 100 MB).
+   * Safe to call periodically or on shutdown.
+   */
+  optimize(): void {
+    this.db.exec("PRAGMA optimize");
+    if (this.getDbSizeBytes() > VACUUM_THRESHOLD_BYTES) {
+      this.db.exec("VACUUM");
+    }
+  }
+
   /** Optimize and close the database connection. Call on shutdown. */
   close(): void {
-    this.db.exec("PRAGMA optimize");
+    this.optimize();
     this.db.close();
   }
 }

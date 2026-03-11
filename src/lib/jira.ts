@@ -1,265 +1,39 @@
 /**
- * Jira REST API v3 client — schema discovery, ticket CRUD, and ADF conversion.
+ * Jira REST API v3 client — ticket CRUD, search, and schema-driven field resolution.
  *
- * Features:
- * - Schema-driven field resolution (display names → custom field IDs)
- * - Auto-fill required fields from discovered schema
- * - Team auto-assignment from board detection
- * - Markdown → Atlassian Document Format conversion
+ * Agile/sprint operations, ADF conversion, types, and schema discovery are in
+ * separate modules and re-exported from this barrel for backward compatibility.
  */
-
 import type { ProjectConfig } from "../config/schema.js";
+import { adfToText, markdownToAdf } from "./adf.js";
+import { fetchWithRetry } from "./http-utils.js";
+import * as agile from "./jira-agile.js";
+import { authHeaders, validateSiteUrl } from "./jira-auth.js";
+import { discoverSchema, loadSchema, loadSchemaFromDb, saveSchemaToDb } from "./jira-schema.js";
+import type {
+  ChangelogEntry,
+  CreatedTicket,
+  FieldResolvable,
+  JiraErrorResponse,
+  JiraFieldSchema,
+  JiraIssueDetail,
+  JiraSchema,
+  JiraTicketInput,
+  JiraTicketUpdate,
+  RawIssueResponse,
+  SearchIssue,
+} from "./jira-types.js";
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+export * from "./adf.js";
+export * from "./jira-auth.js";
+export * from "./jira-schema.js";
+export * from "./jira-types.js";
 
-/** Input for creating a new Jira issue. */
-export interface JiraTicketInput {
-  summary: string;
-  description?: string;
-  issueType: string;
-  priority?: string;
-  labels?: string[];
-  storyPoints?: number;
-  parentKey?: string;
-  components?: string[];
-  /** Custom fields by display name → value name, resolved to IDs via schema. */
-  namedFields?: Record<string, string>;
-}
-
-/** Input for updating an existing Jira issue. Only provided fields are changed. */
-export interface JiraTicketUpdate {
-  issueKey: string;
-  summary?: string;
-  description?: string;
-  priority?: string;
-  labels?: string[];
-  storyPoints?: number;
-  components?: string[];
-  namedFields?: Record<string, string>;
-  comment?: string;
-}
-
-/** Minimal response from issue creation. */
-export interface CreatedTicket {
-  id: string;
-  key: string;
-  self: string;
-}
-
-/** Full issue details returned by getIssue(). */
-export interface JiraIssueDetail {
-  key: string;
-  id: string;
-  summary: string;
-  description?: string;
-  issueType: string;
-  priority: string;
-  status: string;
-  labels: string[];
-  components: string[];
-  parentKey?: string;
-  assignee?: string;
-  reporter?: string;
-  storyPoints?: number;
-  created: string;
-  updated: string;
-  comments: { author: string; created: string; body: string }[];
-  url: string;
-}
-
-interface JiraErrorResponse {
-  errors?: Record<string, string>;
-  errorMessages?: string[];
-}
-
-/** Shared shape for field resolution across create/update. */
-interface FieldResolvable {
-  storyPoints?: number;
-  components?: string[];
-  namedFields?: Record<string, string>;
-}
-
-// ── ADF Builder ───────────────────────────────────────────────────────────────
-
-/** Minimal ADF node types for Jira descriptions. */
-type AdfNode =
-  | { type: "doc"; version: 1; content: AdfNode[] }
-  | { type: "paragraph"; content: AdfNode[] }
-  | { type: "heading"; attrs: { level: number }; content: AdfNode[] }
-  | { type: "text"; text: string; marks?: { type: string }[] }
-  | { type: "bulletList"; content: AdfNode[] }
-  | { type: "orderedList"; content: AdfNode[] }
-  | { type: "listItem"; content: AdfNode[] }
-  | { type: "codeBlock"; attrs?: { language?: string }; content: AdfNode[] }
-  | { type: "rule" }
-  | { type: "hardBreak" };
-
-function textNode(text: string, marks?: { type: string }[]): AdfNode {
-  return marks?.length ? { type: "text", text, marks } : { type: "text", text };
-}
-
-function paragraph(text: string): AdfNode {
-  return { type: "paragraph", content: parseInline(text) };
-}
-
-/** Parse inline markdown (bold, italic, code) into ADF text nodes. */
-function parseInline(text: string): AdfNode[] {
-  const nodes: AdfNode[] = [];
-  const re = /(\*\*(.+?)\*\*|\*(.+?)\*|`(.+?)`)/g;
-  let last = 0;
-  let match: RegExpExecArray | null = re.exec(text);
-
-  while (match !== null) {
-    if (match.index > last) nodes.push(textNode(text.slice(last, match.index)));
-    if (match[2]) nodes.push(textNode(match[2], [{ type: "strong" }]));
-    else if (match[3]) nodes.push(textNode(match[3], [{ type: "em" }]));
-    else if (match[4]) nodes.push(textNode(match[4], [{ type: "code" }]));
-    last = match.index + match[0].length;
-    match = re.exec(text);
-  }
-
-  if (last < text.length) nodes.push(textNode(text.slice(last)));
-  if (nodes.length === 0) nodes.push(textNode(text || " "));
-  return nodes;
-}
-
-/** Try to parse a heading line into an ADF heading node. */
-function parseHeading(line: string): AdfNode | null {
-  const headingRe = /^(#{1,6})\s+(.+)/;
-  const hm = headingRe.exec(line);
-  if (!hm) return null;
-  return { type: "heading", attrs: { level: hm[1]?.length ?? 1 }, content: parseInline(hm[2] ?? "") };
-}
-
-/** Parse a fenced code block starting at index `i`. Returns the node and the new index. */
-function parseCodeBlock(lines: string[], i: number): { node: AdfNode; next: number } {
-  const lang = lines[i]?.slice(3).trim() || undefined;
-  const codeLines: string[] = [];
-  i++;
-  while (i < lines.length && !lines[i]?.startsWith("```")) {
-    codeLines.push(lines[i] ?? "");
-    i++;
-  }
-  i++;
-  const node = {
-    type: "codeBlock",
-    ...(lang ? { attrs: { language: lang } } : {}),
-    content: [textNode(codeLines.join("\n"))],
-  } as AdfNode;
-  return { node, next: i };
-}
-
-/** Collect consecutive list items matching `pattern` and return a list node. */
-function parseList(
-  lines: string[],
-  i: number,
-  pattern: RegExp,
-  listType: "bulletList" | "orderedList",
-): { node: AdfNode; next: number } {
-  const items: AdfNode[] = [];
-  while (i < lines.length && pattern.test(lines[i] ?? "")) {
-    items.push({ type: "listItem", content: [paragraph((lines[i] ?? "").replace(pattern, ""))] });
-    i++;
-  }
-  return { node: { type: listType, content: items }, next: i };
-}
-
-/** Convert markdown-ish text to an ADF document node. */
-export function markdownToAdf(md: string): AdfNode {
-  const lines = md.split("\n");
-  const content: AdfNode[] = [];
-  let i = 0;
-
-  while (i < lines.length) {
-    const line = lines[i] ?? "";
-
-    // Headings
-    const heading = parseHeading(line);
-    if (heading) {
-      content.push(heading);
-      i++;
-      continue;
-    }
-
-    // Horizontal rule
-    if (/^---+$/.test(line.trim())) {
-      content.push({ type: "rule" });
-      i++;
-      continue;
-    }
-
-    // Code block
-    if (line.startsWith("```")) {
-      const result = parseCodeBlock(lines, i);
-      content.push(result.node);
-      i = result.next;
-      continue;
-    }
-
-    // Bullet list
-    if (/^[-*]\s/.test(line)) {
-      const result = parseList(lines, i, /^[-*]\s/, "bulletList");
-      content.push(result.node);
-      i = result.next;
-      continue;
-    }
-
-    // Ordered list
-    if (/^\d+\.\s/.test(line)) {
-      const result = parseList(lines, i, /^\d+\.\s/, "orderedList");
-      content.push(result.node);
-      i = result.next;
-      continue;
-    }
-
-    // Empty line — skip
-    if (line.trim() === "") {
-      i++;
-      continue;
-    }
-
-    // Regular paragraph
-    content.push(paragraph(line));
-    i++;
-  }
-
-  return { type: "doc", version: 1, content };
-}
-
-/** Extract plain text from an ADF node tree (for display). */
-function adfToText(node: Record<string, unknown>): string {
-  if (!node) return "";
-  if (node.type === "text") return (node.text as string) || "";
-  if (node.type === "hardBreak") return "\n";
-  if (Array.isArray(node.content)) {
-    const inner = node.content.map((n: Record<string, unknown>) => adfToText(n)).join("");
-    if (node.type === "paragraph" || node.type === "heading") return `${inner}\n`;
-    if (node.type === "listItem") return `- ${inner}\n`;
-    if (node.type === "codeBlock") return `\`\`\`\n${inner}\n\`\`\`\n`;
-    return inner;
-  }
-  return "";
-}
-
-// ── Jira Client ───────────────────────────────────────────────────────────────
-
+const ISSUE_KEY_RE = /^[A-Z][A-Z0-9_]+-\d+$/;
 const REQUEST_TIMEOUT_MS = 15_000;
 
-/** Authenticated GET helper for Jira REST API (used by discoverSchema). */
-async function jiraGet<T>(baseUrl: string, headers: Record<string, string>, path: string): Promise<T> {
-  const res = await fetch(`${baseUrl}${path}`, { headers, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
-  if (!res.ok) throw new Error(`Jira ${res.status} ${path}`);
-  return res.json() as Promise<T>;
-}
-
-/** Build Basic auth headers from Atlassian credentials. */
-function authHeaders(email: string, apiToken: string): Record<string, string> {
-  const credentials = `${email}:${apiToken}`;
-  return {
-    Authorization: `Basic ${Buffer.from(credentials).toString("base64")}`,
-    Accept: "application/json",
-    "Content-Type": "application/json",
-  };
+function validateIssueKey(key: string): void {
+  if (!ISSUE_KEY_RE.test(key)) throw new Error(`Invalid issue key: "${key}" — expected format like ABC-123`);
 }
 
 export class JiraClient {
@@ -269,22 +43,25 @@ export class JiraClient {
   private readonly schema: JiraSchema | null;
 
   constructor(config: ProjectConfig & { jiraProjectKey: string }, schema?: JiraSchema | null) {
+    validateSiteUrl(config.siteUrl);
     this.baseUrl = config.siteUrl.replace(/\/$/, "");
     this.projectKey = config.jiraProjectKey;
     this.headers = authHeaders(config.email, config.apiToken);
     this.schema = schema || null;
   }
 
-  // ── HTTP ──
-
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const res = await fetch(`${this.baseUrl}${path}`, {
+  private fetchWithRetry(method: string, url: string, body?: unknown): Promise<Response> {
+    return fetchWithRetry(url, {
       method,
       headers: this.headers,
-      body: body ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      body,
+      timeoutMs: REQUEST_TIMEOUT_MS,
+      label: "Jira",
     });
+  }
 
+  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+    const res = await this.fetchWithRetry(method, `${this.baseUrl}${path}`, body);
     if (!res.ok) {
       const text = await res.text();
       let detail = text.slice(0, 500);
@@ -297,124 +74,231 @@ export class JiraClient {
       }
       throw new Error(`Jira ${res.status} ${method} ${path}: ${detail}`);
     }
-
     if (res.status === 204) return undefined as T;
     return res.json() as Promise<T>;
   }
 
+  private get req(): agile.RequestFn {
+    return this.request.bind(this);
+  }
+
   // ── Issue CRUD ──
 
-  /** Create a single Jira issue. */
   async createIssue(input: JiraTicketInput): Promise<CreatedTicket> {
     const fields: Record<string, unknown> = {
       project: { key: this.projectKey },
       summary: input.summary,
       issuetype: { name: input.issueType },
     };
-
     if (input.description) fields.description = markdownToAdf(input.description);
     if (input.priority) fields.priority = { name: input.priority };
     if (input.labels?.length) fields.labels = input.labels;
     if (input.parentKey) fields.parent = { key: input.parentKey };
-
     this.resolveCustomFields(fields, input, input.issueType);
     this.autoFillRequired(fields, input.issueType);
-
     return this.request<CreatedTicket>("POST", "/rest/api/3/issue", { fields });
   }
 
-  /** Fetch a Jira issue with key fields for display. */
   async getIssue(issueKey: string): Promise<JiraIssueDetail> {
+    validateIssueKey(issueKey);
     const base =
       "summary,description,issuetype,priority,status,labels,components,parent,assignee,reporter,created,updated,comment";
     const spFieldId = this.resolveFieldId("Story Points");
     const fieldList = spFieldId ? `${base},${spFieldId}` : base;
-
-    const raw = await this.request<Record<string, any>>("GET", `/rest/api/3/issue/${issueKey}?fields=${fieldList}`);
+    const raw = await this.request<RawIssueResponse>(
+      "GET",
+      `/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=${fieldList}`,
+    );
     const f = raw.fields;
-
     return {
       key: raw.key,
       id: raw.id,
       summary: f.summary,
       description: f.description ? adfToText(f.description) : undefined,
-      issueType: f.issuetype?.name,
-      priority: f.priority?.name,
-      status: f.status?.name,
+      issueType: f.issuetype?.name ?? "",
+      priority: f.priority?.name ?? "",
+      status: f.status?.name ?? "",
       labels: f.labels || [],
-      components: f.components?.map((c: { name: string }) => c.name) || [],
+      components: f.components?.map((c) => c.name) || [],
       parentKey: f.parent?.key,
       assignee: f.assignee?.displayName,
       reporter: f.reporter?.displayName,
-      storyPoints: spFieldId ? f[spFieldId] : undefined,
+      storyPoints: spFieldId ? (f[spFieldId] as number | undefined) : undefined,
       created: f.created,
       updated: f.updated,
       comments:
-        f.comment?.comments
-          ?.slice(-5)
-          .map((c: { author?: { displayName: string }; created: string; body: Record<string, unknown> }) => ({
-            author: c.author?.displayName,
-            created: c.created,
-            body: adfToText(c.body),
-          })) || [],
-      url: `${this.baseUrl}/browse/${raw.key}`,
+        f.comment?.comments?.slice(-5).map((c) => ({
+          author: c.author?.displayName ?? "",
+          created: c.created,
+          body: adfToText(c.body),
+        })) || [],
+      url: `${this.baseUrl}/browse/${encodeURIComponent(raw.key)}`,
     };
   }
 
-  /** Update an existing Jira issue. Only provided fields are changed. */
   async updateIssue(input: JiraTicketUpdate): Promise<void> {
+    validateIssueKey(input.issueKey);
+    const encodedKey = encodeURIComponent(input.issueKey);
     const issue = await this.request<{ fields: { issuetype: { name: string } } }>(
       "GET",
-      `/rest/api/3/issue/${input.issueKey}?fields=issuetype`,
+      `/rest/api/3/issue/${encodedKey}?fields=issuetype`,
     );
     const issueType = issue.fields.issuetype.name;
     const fields: Record<string, unknown> = {};
-
     if (input.summary != null) fields.summary = input.summary;
     if (input.description != null) fields.description = markdownToAdf(input.description);
     if (input.priority != null) fields.priority = { name: input.priority };
     if (input.labels != null) fields.labels = input.labels;
-
+    if (input.parentKey != null) fields.parent = { key: input.parentKey };
     this.resolveCustomFields(fields, input, issueType);
-
     const body: Record<string, unknown> = {};
     if (Object.keys(fields).length > 0) body.fields = fields;
-    if (input.comment) {
-      body.update = { comment: [{ add: { body: markdownToAdf(input.comment) } }] };
-    }
-
+    if (input.comment) body.update = { comment: [{ add: { body: markdownToAdf(input.comment) } }] };
     if (Object.keys(body).length === 0) throw new Error("No fields to update");
-    await this.request<void>("PUT", `/rest/api/3/issue/${input.issueKey}`, body);
+    await this.request<void>("PUT", `/rest/api/3/issue/${encodedKey}`, body);
   }
 
-  /** Create multiple issues sequentially. Returns successes and errors. */
   async createIssuesBatch(inputs: JiraTicketInput[]): Promise<{ issues: CreatedTicket[]; errors: string[] }> {
     const issues: CreatedTicket[] = [];
     const errors: string[] = [];
-
     for (const input of inputs) {
       try {
         issues.push(await this.createIssue(input));
-      } catch (err) {
+      } catch (err: unknown) {
         errors.push(`${input.summary}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-
     return { issues, errors };
   }
 
-  // ── Schema-driven field resolution (shared by create & update) ──
+  get storyPointsFieldId(): string | undefined {
+    return this.resolveFieldId("Story Points") ?? undefined;
+  }
 
-  /**
-   * Resolve storyPoints, components, and namedFields into Jira custom field IDs.
-   * Mutates the `fields` object in place.
-   */
+  // ── Search ──
+
+  private static readonly DEFAULT_SEARCH_FIELDS = [
+    "summary",
+    "status",
+    "issuetype",
+    "priority",
+    "assignee",
+    "created",
+    "updated",
+    "labels",
+    "components",
+    "fixVersions",
+  ];
+
+  async searchIssues(
+    jql: string,
+    fields?: string[],
+    maxResults = 50,
+    startAt = 0,
+  ): Promise<{ issues: SearchIssue[]; total: number }> {
+    const fieldList = [...(fields || JiraClient.DEFAULT_SEARCH_FIELDS)];
+    const spFieldId = this.resolveFieldId("Story Points");
+    if (spFieldId && !fieldList.includes(spFieldId)) fieldList.push(spFieldId);
+    const params = new URLSearchParams({
+      jql,
+      fields: fieldList.join(","),
+      maxResults: String(Math.min(maxResults, 100)),
+      startAt: String(startAt),
+    });
+    const res = await this.request<{ issues: SearchIssue[]; total?: number; maxResults?: number }>(
+      "GET",
+      `/rest/api/3/search/jql?${params.toString()}`,
+    );
+    return { issues: res.issues, total: res.total ?? res.issues.length };
+  }
+
+  private buildFieldList(extra?: string[]): string {
+    const fl = [...(extra || JiraClient.DEFAULT_SEARCH_FIELDS)];
+    const spFieldId = this.resolveFieldId("Story Points");
+    if (spFieldId && !fl.includes(spFieldId)) fl.push(spFieldId);
+    return fl.join(",");
+  }
+
+  // ── Agile delegates (see jira-agile.ts) ──
+
+  async listSprints(boardId: string, state?: "active" | "future" | "closed") {
+    return agile.listSprints(this.req, boardId, state);
+  }
+  async getSprint(sprintId: string) {
+    return agile.getSprint(this.req, sprintId);
+  }
+  async getSprintIssues(sprintId: string, fields?: string[]) {
+    return agile.getSprintIssues(this.req, sprintId, this.buildFieldList(fields));
+  }
+  async createSprint(boardId: string, name: string, opts?: { goal?: string; startDate?: string; endDate?: string }) {
+    return agile.createSprint(this.req, boardId, name, opts);
+  }
+  async moveIssuesToSprint(sprintId: string, issueKeys: string[]) {
+    return agile.moveIssuesToSprint(this.req, sprintId, issueKeys);
+  }
+  async getTransitions(issueKey: string) {
+    return agile.getTransitions(this.req, issueKey);
+  }
+  async transitionIssue(issueKey: string, transitionId: string) {
+    return agile.transitionIssue(this.req, issueKey, transitionId);
+  }
+  async assignIssue(issueKey: string, accountId: string | null) {
+    return agile.assignIssue(this.req, issueKey, accountId);
+  }
+  async linkIssues(inwardKey: string, outwardKey: string, linkType: string) {
+    return agile.linkIssues(this.req, inwardKey, outwardKey, linkType);
+  }
+  async getIssueLinkTypes() {
+    return agile.getIssueLinkTypes(this.req);
+  }
+  async getIssueChangelog(issueKey: string): Promise<ChangelogEntry[]> {
+    return agile.getIssueChangelog(this.req, issueKey);
+  }
+  async addComment(issueKey: string, body: string) {
+    return agile.addComment(this.req, issueKey, body);
+  }
+  async addLabels(issueKey: string, labels: string[]) {
+    return agile.addLabels(this.req, issueKey, labels);
+  }
+  async rankIssue(issueKey: string, options: { rankBefore?: string; rankAfter?: string }) {
+    return agile.rankIssue(this.req, issueKey, options);
+  }
+  async getBacklogIssues(boardId: string, maxResults = 50, startAt = 0) {
+    return agile.getBacklogIssues(this.req, boardId, this.buildFieldList(), maxResults, startAt);
+  }
+  async searchBoardIssues(boardId: string, jql?: string, maxResults = 50, startAt = 0) {
+    return agile.searchBoardIssues(this.req, boardId, this.buildFieldList(), jql, maxResults, startAt);
+  }
+  async searchBacklogIssues(boardId: string, jql?: string, maxResults = 50, startAt = 0) {
+    return agile.searchBacklogIssues(this.req, boardId, this.buildFieldList(), jql, maxResults, startAt);
+  }
+  async getIssueLinks(issueKey: string) {
+    return agile.getIssueLinks(this.req, issueKey);
+  }
+  async getDevStatus(issueId: string) {
+    return agile.getDevStatus(this.req, issueId);
+  }
+  async getSprintDetails(sprintId: string) {
+    return agile.getSprintDetails(this.req, sprintId);
+  }
+  async updateSprint(
+    sprintId: string,
+    updates: { goal?: string; name?: string; startDate?: string; endDate?: string },
+  ) {
+    return agile.updateSprint(this.req, sprintId, updates);
+  }
+  async getEpicIssues(epicKey: string): Promise<SearchIssue[]> {
+    validateIssueKey(epicKey);
+    return (await this.searchIssues(`"Epic Link" = ${epicKey} OR parent = ${epicKey}`)).issues;
+  }
+
+  // ── Schema-driven field resolution ──
+
   private resolveCustomFields(fields: Record<string, unknown>, input: FieldResolvable, issueType: string): void {
     if (input.storyPoints != null) {
       const id = this.resolveFieldId("Story Points", issueType);
       fields[id || "story_points"] = input.storyPoints;
     }
-
     if (input.components?.length) {
       const allowed = this.findFieldSchema("components", issueType)?.allowedValues || [];
       fields.components = input.components.map((name) => {
@@ -422,13 +306,9 @@ export class JiraClient {
         return match ? { id: match.id } : { name };
       });
     }
-
-    if (input.namedFields) {
-      this.resolveNamedFields(fields, input.namedFields, issueType);
-    }
+    if (input.namedFields) this.resolveNamedFields(fields, input.namedFields, issueType);
   }
 
-  /** Resolve namedFields (display name → value) into custom field IDs. Mutates `fields`. */
   private resolveNamedFields(
     fields: Record<string, unknown>,
     namedFields: Record<string, string>,
@@ -437,7 +317,6 @@ export class JiraClient {
     for (const [fieldName, valueName] of Object.entries(namedFields)) {
       const fs = this.findFieldSchema(fieldName, issueType);
       if (!fs) continue;
-
       if (fs.allowedValues?.length) {
         const match = fs.allowedValues.find((v) => v.name.toLowerCase().includes(valueName.toLowerCase()));
         if (match) fields[fs.id] = { id: match.id };
@@ -447,7 +326,6 @@ export class JiraClient {
     }
   }
 
-  /** Find a custom field ID by display name. Searches all issue types if none specified. */
   private resolveFieldId(fieldName: string, issueType?: string): string | null {
     if (!this.schema) return null;
     const types = issueType ? this.schema.issueTypes.filter((t) => t.name === issueType) : this.schema.issueTypes;
@@ -458,26 +336,21 @@ export class JiraClient {
     return null;
   }
 
-  /** Get full field schema (including allowedValues) by name or ID. */
   private findFieldSchema(fieldName: string, issueType: string): JiraFieldSchema | null {
     if (!this.schema) return null;
     const ts = this.schema.issueTypes.find((t) => t.name === issueType);
     return ts?.fields.find((f) => f.name === fieldName || f.id === fieldName) || null;
   }
 
-  /** Auto-fill required custom fields not yet set (picks first allowed value). */
   private autoFillRequired(fields: Record<string, unknown>, issueType: string): void {
     if (!this.schema) return;
     const ts = this.schema.issueTypes.find((t) => t.name === issueType);
     if (!ts) return;
-
     const SYSTEM = new Set(["project", "issuetype", "summary", "parent", "issueType"]);
     for (const field of ts.fields) {
       if (!field.required || SYSTEM.has(field.system || field.id) || fields[field.id] !== undefined) continue;
       if (field.allowedValues?.length) fields[field.id] = { id: field.allowedValues[0]?.id };
     }
-
-    // Auto-assign board team (plain UUID string per Atlassian docs)
     if (this.schema.board?.teamId && this.schema.board.teamFieldId) {
       if (fields[this.schema.board.teamFieldId] === undefined) {
         fields[this.schema.board.teamFieldId] = this.schema.board.teamId;
@@ -485,18 +358,15 @@ export class JiraClient {
     }
   }
 
-  /** Generate a field guide string for an issue type (used in plan-tickets). */
   getFieldGuide(issueType: string): string | null {
     if (!this.schema) return null;
     const ts = this.schema.issueTypes.find((t) => t.name === issueType);
     if (!ts) return null;
-
     const lines = [`## Fields for ${issueType}\n`];
     for (const f of ts.fields) {
       let line = `- **${f.name}** (${f.id}) [${f.type}] — ${f.required ? "**REQUIRED**" : "optional"}`;
       if (f.allowedValues?.length) {
-        const valueList = f.allowedValues.map((v) => `\`${v.name}\``).join(", ");
-        line += `\n  Values: ${valueList}`;
+        line += `\n  Values: ${f.allowedValues.map((v) => `\`${v.name}\``).join(", ")}`;
       }
       lines.push(line);
     }
@@ -507,257 +377,9 @@ export class JiraClient {
     return this.projectKey;
   }
 
-  // ── Static: Schema discovery ──
-
-  /**
-   * Discover full Jira project schema via REST API.
-   * Fetches issue types, fields, priorities, board config, team, statuses, and sample tickets.
-   */
-  static async discoverSchema(
-    config: { siteUrl: string; email: string; apiToken: string },
-    projectKey: string,
-    boardId?: string,
-  ): Promise<JiraSchema> {
-    const baseUrl = config.siteUrl.replace(/\/$/, "");
-    const headers = authHeaders(config.email, config.apiToken);
-    const get = <T>(path: string) => jiraGet<T>(baseUrl, headers, path);
-
-    const schema: JiraSchema = {
-      projectKey,
-      projectName: "",
-      boardId: boardId || "",
-      issueTypes: [],
-      priorities: [],
-    };
-
-    // Project info
-    const project = await get<{ name: string }>(`/rest/api/3/project/${projectKey}`);
-    schema.projectName = project.name;
-
-    // Issue types + fields
-    let rawTypes: { id: string; name: string; subtask?: boolean }[];
-    try {
-      const meta = await get<{ issueTypes?: any[]; values?: any[] }>(
-        `/rest/api/3/issue/createmeta/${projectKey}/issuetypes`,
-      );
-      rawTypes = meta.issueTypes || meta.values || [];
-    } catch {
-      const meta = await get<{ projects?: { issuetypes?: any[] }[] }>(
-        `/rest/api/3/issue/createmeta?projectKeys=${projectKey}&expand=projects.issuetypes`,
-      );
-      rawTypes = meta.projects?.[0]?.issuetypes || [];
-    }
-
-    for (const it of rawTypes) {
-      let rawFields: any[] = [];
-      try {
-        const fm = await get<{ fields?: any[]; values?: any[] }>(
-          `/rest/api/3/issue/createmeta/${projectKey}/issuetypes/${it.id}`,
-        );
-        rawFields = fm.fields || fm.values || [];
-      } catch {
-        /* skip */
-      }
-
-      const fields: JiraFieldSchema[] = rawFields.map((f: any) => {
-        const fld = f.fieldId ? f : { fieldId: f.key, ...f };
-        return {
-          id: fld.fieldId || fld.key,
-          name: fld.name,
-          required: fld.required || false,
-          type: fld.schema?.type || "unknown",
-          system: fld.schema?.system,
-          custom: fld.schema?.custom,
-          allowedValues: fld.allowedValues?.slice(0, 20)?.map((v: any) => ({
-            id: v.id,
-            name: v.name || v.value || v.label,
-          })),
-        };
-      });
-
-      schema.issueTypes.push({
-        id: it.id,
-        name: it.name,
-        subtask: it.subtask || false,
-        fields,
-        requiredFields: fields.filter((f) => f.required).map((f) => f.id),
-      });
-    }
-
-    // Priorities
-    const priorities = await get<{ id: string; name: string }[]>("/rest/api/3/priority");
-    schema.priorities = priorities.map((p) => ({ id: p.id, name: p.name }));
-
-    // Board config + team detection
-    if (boardId) {
-      await JiraClient.discoverBoard(get, schema, boardId);
-    }
-
-    // Statuses + sample tickets
-    await JiraClient.discoverStatusesAndSamples(get, schema, projectKey);
-
-    return schema;
-  }
-
-  /** Discover board configuration and team assignment for a board. */
-  private static async discoverBoard(
-    get: <T>(path: string) => Promise<T>,
-    schema: JiraSchema,
-    boardId: string,
-  ): Promise<void> {
-    try {
-      const bc = await get<any>(`/rest/agile/1.0/board/${boardId}/configuration`);
-      schema.board = {
-        name: bc.name,
-        type: bc.type,
-        estimationField: bc.estimation?.field?.displayName,
-        columns: bc.columnConfig?.columns?.map((c: any) => ({
-          name: c.name,
-          statuses: c.statuses?.map((s: any) => s.name || s.id),
-        })),
-      };
-
-      // Find team field dynamically from schema fields
-      let teamFieldId: string | null = null;
-      for (const it of schema.issueTypes) {
-        const tf = it.fields.find((f) => f.custom?.toLowerCase().includes("team") || f.name === "Team");
-        if (tf) {
-          teamFieldId = tf.id;
-          break;
-        }
-      }
-
-      // Sample a board ticket to get the team value (no allowedValues in create meta)
-      if (teamFieldId) {
-        try {
-          const board = await get<any>(`/rest/agile/1.0/board/${boardId}/issue?maxResults=1&fields=${teamFieldId}`);
-          const teamValue = board.issues?.[0]?.fields?.[teamFieldId];
-          if (teamValue?.id) {
-            schema.board.teamFieldId = teamFieldId;
-            schema.board.teamId = teamValue.id;
-            schema.board.teamName = teamValue.name || teamValue.title;
-          }
-        } catch {
-          /* best-effort */
-        }
-      }
-    } catch {
-      /* optional */
-    }
-  }
-
-  /** Discover statuses and sample tickets for convention detection. */
-  private static async discoverStatusesAndSamples(
-    get: <T>(path: string) => Promise<T>,
-    schema: JiraSchema,
-    projectKey: string,
-  ): Promise<void> {
-    try {
-      const statuses = await get<any[]>(`/rest/api/3/project/${projectKey}/statuses`);
-      schema.statuses = statuses.map((st) => ({
-        issueType: st.name,
-        statuses: st.statuses?.map((s: any) => ({ id: s.id, name: s.name, category: s.statusCategory?.name })),
-      }));
-    } catch {
-      /* optional */
-    }
-
-    try {
-      const jql = `project = ${projectKey} ORDER BY created DESC`;
-      const search = await get<{ issues?: any[] }>(
-        `/rest/api/3/search/jql?jql=${encodeURIComponent(jql)}&maxResults=5&fields=summary,issuetype,priority,labels,status`,
-      );
-      schema.sampleTickets = search.issues?.map((issue: any) => ({
-        key: issue.key,
-        summary: issue.fields.summary,
-        type: issue.fields.issuetype?.name,
-        priority: issue.fields.priority?.name,
-        status: issue.fields.status?.name,
-        labels: issue.fields.labels,
-      }));
-    } catch {
-      /* optional */
-    }
-  }
-
-  // ── Static: Schema persistence ──
-
-  /** Load schema from a JSON file path. */
-  static loadSchema(schemaPath?: string): JiraSchema | null {
-    if (!schemaPath) return null;
-    try {
-      return JSON.parse(require("node:fs").readFileSync(schemaPath, "utf-8")) as JiraSchema;
-    } catch {
-      return null;
-    }
-  }
-
-  /** Load schema from SQLite config. */
-  static loadSchemaFromDb(kb: { getConfig(key: string): string | undefined }): JiraSchema | null {
-    const raw = kb.getConfig("jira-schema");
-    if (!raw) return null;
-    try {
-      return JSON.parse(raw) as JiraSchema;
-    } catch {
-      return null;
-    }
-  }
-
-  /** Save schema to SQLite config. */
-  static saveSchemaToDb(kb: { setConfig(key: string, value: string): void }, schema: JiraSchema): void {
-    kb.setConfig("jira-schema", JSON.stringify(schema));
-  }
-}
-
-// ── Schema types ──────────────────────────────────────────────────────────────
-
-/** Discovered Jira project schema — issue types, fields, priorities, board. */
-export interface JiraSchema {
-  projectKey: string;
-  projectName: string;
-  boardId: string;
-  issueTypes: JiraIssueTypeSchema[];
-  priorities: { id: string; name: string }[];
-  board?: {
-    name: string;
-    type: string;
-    estimationField?: string;
-    columns?: { name: string; statuses?: string[] }[];
-    teamFieldId?: string;
-    /** Team UUID — sent as plain string per Atlassian Teams REST API. */
-    teamId?: string;
-    teamName?: string;
-  };
-  statuses?: {
-    issueType: string;
-    statuses: { id: string; name: string; category: string }[];
-  }[];
-  sampleTickets?: {
-    key: string;
-    summary: string;
-    type: string;
-    priority: string;
-    status: string;
-    labels: string[];
-  }[];
-}
-
-/** Schema for a single issue type. */
-export interface JiraIssueTypeSchema {
-  id: string;
-  name: string;
-  subtask: boolean;
-  fields: JiraFieldSchema[];
-  requiredFields: string[];
-}
-
-/** Schema for a single field within an issue type. */
-export interface JiraFieldSchema {
-  id: string;
-  name: string;
-  required: boolean;
-  type: string;
-  system?: string;
-  custom?: string;
-  allowedValues?: { id: string; name: string }[];
+  // ── Static: Schema (delegated to jira-schema.ts) ──
+  static discoverSchema = discoverSchema;
+  static loadSchema = loadSchema;
+  static loadSchemaFromDb = loadSchemaFromDb;
+  static saveSchemaToDb = saveSchemaToDb;
 }

@@ -1,35 +1,18 @@
 /**
- * Runtime-adaptive SQLite adapter.
- * Uses bun:sqlite when running in Bun, better-sqlite3 when running in Node.
- * Both libraries share a compatible API (exec, prepare, close, transaction).
+ * SQLite adapter using better-sqlite3.
+ * Re-exports the Database class and provides minimal type aliases
+ * for the subset of the API used by this project.
  */
 
+import Database from "better-sqlite3";
+
 type Statement = {
-  run(...params: any[]): any;
-  get(...params: any[]): any;
-  all(...params: any[]): any[];
+  run(...params: unknown[]): unknown;
+  get(...params: unknown[]): unknown;
+  all(...params: unknown[]): unknown[];
 };
 
-type SqliteDatabase = {
-  exec(sql: string): void;
-  prepare(sql: string): Statement;
-  transaction<F extends (...args: any[]) => any>(fn: F): F;
-  close(): void;
-};
+type SqliteDatabase = InstanceType<typeof Database>;
 
-type SqliteConstructor = new (path: string) => SqliteDatabase;
-
-const isBun = typeof globalThis.Bun !== "undefined";
-
-let DatabaseCtor: SqliteConstructor;
-
-if (isBun) {
-  const mod = await import("bun:sqlite");
-  DatabaseCtor = mod.Database as unknown as SqliteConstructor;
-} else {
-  const mod = await import("better-sqlite3");
-  DatabaseCtor = mod.default as unknown as SqliteConstructor;
-}
-
-export { DatabaseCtor as Database };
+export { Database };
 export type { SqliteDatabase, Statement };

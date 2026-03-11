@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import type { PageType } from "../config/schema.js";
 // Import schemas and types to exercise them
 import { PAGE_TYPES } from "../config/schema.js";

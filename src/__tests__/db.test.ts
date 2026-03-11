@@ -1,9 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { IndexedPage } from "../lib/db.js";
-import { KnowledgeBase } from "../lib/db.js";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { CachedChangelogEntry, CachedSprint, IndexedPage } from "../lib/db.js";
+import { KnowledgeBase, sanitizeFtsQuery } from "../lib/db.js";
 
 /** Create a minimal IndexedPage for testing. */
 function makePage(overrides: Partial<IndexedPage> = {}): IndexedPage {
@@ -291,5 +291,487 @@ describe("clearSpace", () => {
     kb.clearSpace("ENG");
     expect(kb.getPage("1")).toBeFalsy();
     expect(kb.getPage("2")).toBeTruthy();
+  });
+});
+
+// ── Sprints cache ─────────────────────────────────────────────────────────
+
+function makeSprint(overrides: Partial<CachedSprint> = {}): CachedSprint {
+  return {
+    id: overrides.id ?? "sprint-1",
+    board_id: overrides.board_id ?? "board-1",
+    name: overrides.name ?? "Sprint 1",
+    state: overrides.state ?? "active",
+    goal: overrides.goal ?? "Ship auth feature",
+    start_date: overrides.start_date ?? "2025-06-01T00:00:00Z",
+    end_date: overrides.end_date ?? "2025-06-14T00:00:00Z",
+    complete_date: overrides.complete_date ?? null,
+    cached_at: overrides.cached_at ?? new Date().toISOString(),
+  };
+}
+
+function makeChangelog(overrides: Partial<CachedChangelogEntry> = {}): CachedChangelogEntry {
+  return {
+    id: overrides.id ?? "cl-1",
+    issue_key: overrides.issue_key ?? "PROJ-1",
+    author_name: overrides.author_name ?? "Alice",
+    author_id: overrides.author_id ?? "user-1",
+    created: overrides.created ?? "2025-06-01T10:00:00Z",
+    field: overrides.field ?? "status",
+    from_value: overrides.from_value ?? "To Do",
+    to_value: overrides.to_value ?? "In Progress",
+    cached_at: overrides.cached_at ?? new Date().toISOString(),
+  };
+}
+
+describe("sprints cache", () => {
+  it("upsertSprint stores and retrieves sprint", () => {
+    const sprint = makeSprint();
+    kb.upsertSprint(sprint);
+    const result = kb.getSprint("sprint-1");
+    expect(result).toBeDefined();
+    expect(result?.name).toBe("Sprint 1");
+    expect(result?.state).toBe("active");
+  });
+
+  it("upsertSprint updates on re-upsert", () => {
+    kb.upsertSprint(makeSprint({ state: "active" }));
+    kb.upsertSprint(makeSprint({ state: "closed" }));
+    expect(kb.getSprint("sprint-1")?.state).toBe("closed");
+  });
+
+  it("upsertSprints batch inserts in transaction", () => {
+    const sprints = [
+      makeSprint({ id: "s1", name: "Sprint 1" }),
+      makeSprint({ id: "s2", name: "Sprint 2" }),
+      makeSprint({ id: "s3", name: "Sprint 3" }),
+    ];
+    kb.upsertSprints(sprints);
+    expect(kb.getSprint("s1")).toBeDefined();
+    expect(kb.getSprint("s2")).toBeDefined();
+    expect(kb.getSprint("s3")).toBeDefined();
+  });
+
+  it("getSprintsByBoard filters by board ID", () => {
+    kb.upsertSprint(makeSprint({ id: "s1", board_id: "board-1" }));
+    kb.upsertSprint(makeSprint({ id: "s2", board_id: "board-2" }));
+    kb.upsertSprint(makeSprint({ id: "s3", board_id: "board-1" }));
+
+    const results = kb.getSprintsByBoard("board-1");
+    expect(results).toHaveLength(2);
+    expect(results.every((s) => s.board_id === "board-1")).toBe(true);
+  });
+
+  it("getSprintsByBoard filters by state", () => {
+    kb.upsertSprint(makeSprint({ id: "s1", board_id: "board-1", state: "active" }));
+    kb.upsertSprint(makeSprint({ id: "s2", board_id: "board-1", state: "closed" }));
+    kb.upsertSprint(makeSprint({ id: "s3", board_id: "board-1", state: "active" }));
+
+    const results = kb.getSprintsByBoard("board-1", "active");
+    expect(results).toHaveLength(2);
+    expect(results.every((s) => s.state === "active")).toBe(true);
+  });
+
+  it("getSprint returns undefined for missing sprint", () => {
+    expect(kb.getSprint("nonexistent")).toBeFalsy();
+  });
+});
+
+// ── Changelogs cache ──────────────────────────────────────────────────────
+
+describe("changelogs cache", () => {
+  it("upsertChangelog stores entries", () => {
+    kb.upsertChangelog([makeChangelog()]);
+    const results = kb.getChangelog("PROJ-1");
+    expect(results).toHaveLength(1);
+    expect(results[0]?.field).toBe("status");
+  });
+
+  it("getChangelog returns entries sorted by created date", () => {
+    kb.upsertChangelog([
+      makeChangelog({ id: "cl-3", created: "2025-06-03T10:00:00Z" }),
+      makeChangelog({ id: "cl-1", created: "2025-06-01T10:00:00Z" }),
+      makeChangelog({ id: "cl-2", created: "2025-06-02T10:00:00Z" }),
+    ]);
+    const results = kb.getChangelog("PROJ-1");
+    expect(results).toHaveLength(3);
+    expect(results[0]?.id).toBe("cl-1");
+    expect(results[1]?.id).toBe("cl-2");
+    expect(results[2]?.id).toBe("cl-3");
+  });
+
+  it("getChangelogByField filters by field name", () => {
+    kb.upsertChangelog([
+      makeChangelog({ id: "cl-1", field: "status" }),
+      makeChangelog({ id: "cl-2", field: "assignee" }),
+      makeChangelog({ id: "cl-3", field: "status" }),
+    ]);
+    const results = kb.getChangelogByField("PROJ-1", "status");
+    expect(results).toHaveLength(2);
+    expect(results.every((r) => r.field === "status")).toBe(true);
+  });
+
+  it("clearChangelogForIssue removes all entries for an issue", () => {
+    kb.upsertChangelog([
+      makeChangelog({ id: "cl-1", issue_key: "PROJ-1" }),
+      makeChangelog({ id: "cl-2", issue_key: "PROJ-1" }),
+      makeChangelog({ id: "cl-3", issue_key: "PROJ-2" }),
+    ]);
+    kb.clearChangelogForIssue("PROJ-1");
+    expect(kb.getChangelog("PROJ-1")).toHaveLength(0);
+    expect(kb.getChangelog("PROJ-2")).toHaveLength(1);
+  });
+});
+
+// ── getStalePages ─────────────────────────────────────────────────────────
+
+describe("getStalePages", () => {
+  it("returns pages older than cutoff date", () => {
+    kb.upsertPage(makePage({ id: "1", updated_at: "2025-01-01T00:00:00Z" }));
+    kb.upsertPage(makePage({ id: "2", updated_at: "2025-06-01T00:00:00Z" }));
+    kb.upsertPage(makePage({ id: "3", updated_at: "2025-03-01T00:00:00Z" }));
+
+    const stale = kb.getStalePages("2025-04-01T00:00:00Z");
+    expect(stale).toHaveLength(2);
+  });
+
+  it("filters by space key", () => {
+    kb.upsertPage(makePage({ id: "1", updated_at: "2025-01-01T00:00:00Z", space_key: "ENG" }));
+    kb.upsertPage(makePage({ id: "2", updated_at: "2025-01-01T00:00:00Z", space_key: "PM" }));
+
+    const stale = kb.getStalePages("2025-04-01T00:00:00Z", { spaceKey: "ENG" });
+    expect(stale).toHaveLength(1);
+    expect(stale[0]?.space_key).toBe("ENG");
+  });
+
+  it("filters by page type", () => {
+    kb.upsertPage(makePage({ id: "1", updated_at: "2025-01-01T00:00:00Z", page_type: "adr" }));
+    kb.upsertPage(makePage({ id: "2", updated_at: "2025-01-01T00:00:00Z", page_type: "design" }));
+
+    const stale = kb.getStalePages("2025-04-01T00:00:00Z", { pageType: "adr" });
+    expect(stale).toHaveLength(1);
+    expect(stale[0]?.page_type).toBe("adr");
+  });
+
+  it("returns empty when all pages are fresh", () => {
+    kb.upsertPage(makePage({ id: "1", updated_at: "2025-06-01T00:00:00Z" }));
+    const stale = kb.getStalePages("2025-01-01T00:00:00Z");
+    expect(stale).toHaveLength(0);
+  });
+});
+
+// ── getRecentlyIndexed ────────────────────────────────────────────────────
+
+describe("getRecentlyIndexed", () => {
+  it("returns pages indexed after timestamp", () => {
+    kb.upsertPage(makePage({ id: "1", indexed_at: "2025-06-01T00:00:00Z" }));
+    kb.upsertPage(makePage({ id: "2", indexed_at: "2025-06-10T00:00:00Z" }));
+
+    const recent = kb.getRecentlyIndexed("2025-06-05T00:00:00Z");
+    expect(recent).toHaveLength(1);
+    expect(recent[0]?.id).toBe("2");
+  });
+
+  it("returns empty when nothing recent", () => {
+    kb.upsertPage(makePage({ id: "1", indexed_at: "2025-01-01T00:00:00Z" }));
+    const recent = kb.getRecentlyIndexed("2025-06-01T00:00:00Z");
+    expect(recent).toHaveLength(0);
+  });
+});
+
+// ── Team rules ────────────────────────────────────────────────────────────
+
+describe("team rules", () => {
+  it("upsertTeamRule stores and retrieves a rule", () => {
+    kb.upsertTeamRule({
+      category: "naming_convention",
+      rule_key: "pattern/Story",
+      issue_type: "Story",
+      rule_value: "verb-first",
+      confidence: 0.85,
+      sample_size: 30,
+    });
+    const rules = kb.getTeamRules();
+    expect(rules).toHaveLength(1);
+    expect(rules[0]?.category).toBe("naming_convention");
+    expect(rules[0]?.rule_value).toBe("verb-first");
+    expect(rules[0]?.confidence).toBeCloseTo(0.85);
+  });
+
+  it("upsertTeamRule updates on conflict", () => {
+    kb.upsertTeamRule({
+      category: "naming_convention",
+      rule_key: "pattern/Story",
+      issue_type: "Story",
+      rule_value: "verb-first",
+      confidence: 0.5,
+      sample_size: 10,
+    });
+    kb.upsertTeamRule({
+      category: "naming_convention",
+      rule_key: "pattern/Story",
+      issue_type: "Story",
+      rule_value: "tag-prefix",
+      confidence: 0.9,
+      sample_size: 50,
+    });
+    const rules = kb.getTeamRules();
+    expect(rules).toHaveLength(1);
+    expect(rules[0]?.rule_value).toBe("tag-prefix");
+    expect(rules[0]?.confidence).toBeCloseTo(0.9);
+  });
+
+  it("getTeamRules filters by category", () => {
+    kb.upsertTeamRule({
+      category: "naming_convention",
+      rule_key: "pattern/Story",
+      issue_type: "Story",
+      rule_value: "verb-first",
+      confidence: 0.8,
+      sample_size: 20,
+    });
+    kb.upsertTeamRule({
+      category: "story_points",
+      rule_key: "median/Story",
+      issue_type: "Story",
+      rule_value: "5",
+      confidence: 0.7,
+      sample_size: 25,
+    });
+
+    const naming = kb.getTeamRules("naming_convention");
+    expect(naming).toHaveLength(1);
+    expect(naming[0]?.category).toBe("naming_convention");
+
+    const points = kb.getTeamRules("story_points");
+    expect(points).toHaveLength(1);
+    expect(points[0]?.category).toBe("story_points");
+  });
+
+  it("getTeamRules filters by issueType (includes null issue_type rules)", () => {
+    kb.upsertTeamRule({
+      category: "naming_convention",
+      rule_key: "pattern/Story",
+      issue_type: "Story",
+      rule_value: "verb-first",
+      confidence: 0.8,
+      sample_size: 20,
+    });
+    kb.upsertTeamRule({
+      category: "naming_convention",
+      rule_key: "pattern/Bug",
+      issue_type: "Bug",
+      rule_value: "verb-first",
+      confidence: 0.7,
+      sample_size: 15,
+    });
+    kb.upsertTeamRule({
+      category: "label_patterns",
+      rule_key: "top_labels",
+      issue_type: null,
+      rule_value: "[]",
+      confidence: 0.6,
+      sample_size: 30,
+    });
+
+    const storyRules = kb.getTeamRules(undefined, "Story");
+    // Should include Story-specific + null issue_type rules
+    expect(storyRules.length).toBeGreaterThanOrEqual(2);
+    expect(storyRules.some((r) => r.issue_type === "Story")).toBe(true);
+    expect(storyRules.some((r) => r.issue_type === null)).toBe(true);
+    expect(storyRules.every((r) => r.issue_type !== "Bug")).toBe(true);
+  });
+
+  it("getTeamRules filters by both category and issueType", () => {
+    kb.upsertTeamRule({
+      category: "naming_convention",
+      rule_key: "pattern/Story",
+      issue_type: "Story",
+      rule_value: "verb-first",
+      confidence: 0.8,
+      sample_size: 20,
+    });
+    kb.upsertTeamRule({
+      category: "naming_convention",
+      rule_key: "pattern/Bug",
+      issue_type: "Bug",
+      rule_value: "verb-first",
+      confidence: 0.7,
+      sample_size: 15,
+    });
+
+    const result = kb.getTeamRules("naming_convention", "Story");
+    expect(result).toHaveLength(1);
+    expect(result[0]?.issue_type).toBe("Story");
+  });
+
+  it("getTeamRules returns empty array when no rules exist", () => {
+    const rules = kb.getTeamRules();
+    expect(rules).toEqual([]);
+  });
+
+  it("clearTeamRules removes all team rules", () => {
+    kb.upsertTeamRule({
+      category: "naming_convention",
+      rule_key: "pattern/Story",
+      issue_type: "Story",
+      rule_value: "verb-first",
+      confidence: 0.8,
+      sample_size: 20,
+    });
+    kb.upsertTeamRule({
+      category: "story_points",
+      rule_key: "median/Story",
+      issue_type: "Story",
+      rule_value: "5",
+      confidence: 0.7,
+      sample_size: 25,
+    });
+
+    expect(kb.getTeamRules().length).toBe(2);
+    kb.clearTeamRules();
+    expect(kb.getTeamRules()).toEqual([]);
+  });
+});
+
+// ── Backlog analysis ──────────────────────────────────────────────────────
+
+describe("backlog analysis", () => {
+  it("recordAnalysis stores and getLatestAnalysis retrieves it", () => {
+    kb.recordAnalysis({
+      project_key: "PROJ",
+      tickets_fetched: 100,
+      tickets_quality_passed: 80,
+      quality_threshold: 60,
+      rules_extracted: 25,
+      jql_used: "project = PROJ ORDER BY created DESC",
+      analyzed_at: "2025-06-01T00:00:00Z",
+    });
+
+    const latest = kb.getLatestAnalysis();
+    expect(latest).not.toBeNull();
+    expect(latest?.project_key).toBe("PROJ");
+    expect(latest?.tickets_fetched).toBe(100);
+    expect(latest?.tickets_quality_passed).toBe(80);
+    expect(latest?.rules_extracted).toBe(25);
+  });
+
+  it("getLatestAnalysis returns most recent by timestamp", () => {
+    kb.recordAnalysis({
+      project_key: "PROJ",
+      tickets_fetched: 50,
+      tickets_quality_passed: 40,
+      quality_threshold: 60,
+      rules_extracted: 15,
+      jql_used: "project = PROJ",
+      analyzed_at: "2025-01-01T00:00:00Z",
+    });
+    kb.recordAnalysis({
+      project_key: "PROJ",
+      tickets_fetched: 100,
+      tickets_quality_passed: 80,
+      quality_threshold: 60,
+      rules_extracted: 30,
+      jql_used: "project = PROJ",
+      analyzed_at: "2025-06-01T00:00:00Z",
+    });
+
+    const latest = kb.getLatestAnalysis();
+    expect(latest).not.toBeNull();
+    expect(latest?.tickets_fetched).toBe(100);
+    expect(latest?.rules_extracted).toBe(30);
+    expect(latest?.analyzed_at).toBe("2025-06-01T00:00:00Z");
+  });
+
+  it("getLatestAnalysis returns null when no analysis exists", () => {
+    const latest = kb.getLatestAnalysis();
+    expect(latest).toBeNull();
+  });
+});
+
+// ── sanitizeFtsQuery ──────────────────────────────────────────────────────
+
+describe("sanitizeFtsQuery", () => {
+  it("wraps words in double quotes", () => {
+    expect(sanitizeFtsQuery("foo bar")).toBe('"foo" "bar"');
+  });
+
+  it("strips special FTS5 characters", () => {
+    expect(sanitizeFtsQuery('hello* "world" (test)')).toBe('"hello" "world" "test"');
+  });
+
+  it("strips caret and plus/minus operators", () => {
+    expect(sanitizeFtsQuery("^start +include -exclude")).toBe('"start" "include" "exclude"');
+  });
+
+  it("removes FTS5 keyword operators", () => {
+    expect(sanitizeFtsQuery("foo AND bar OR baz NOT qux")).toBe('"foo" "bar" "baz" "qux"');
+    expect(sanitizeFtsQuery("term1 NEAR term2")).toBe('"term1" "term2"');
+  });
+
+  it("handles case-insensitive FTS5 operators", () => {
+    expect(sanitizeFtsQuery("foo and bar or baz")).toBe('"foo" "bar" "baz"');
+  });
+
+  it("returns empty string for empty input", () => {
+    expect(sanitizeFtsQuery("")).toBe("");
+  });
+
+  it("returns empty string for whitespace-only input", () => {
+    expect(sanitizeFtsQuery("   \t\n  ")).toBe("");
+  });
+
+  it("returns empty string for only-special-chars input", () => {
+    expect(sanitizeFtsQuery('*"()+^-')).toBe("");
+  });
+});
+
+// ── Search with special characters ────────────────────────────────────────
+
+describe("search with special FTS5 characters", () => {
+  it("does not throw on special characters in search()", () => {
+    kb.upsertPage(makePage({ id: "1", content: "safe content here" }));
+    expect(() => kb.search('test* "quoted" (parens) AND OR NOT')).not.toThrow();
+  });
+
+  it("does not throw on special characters in searchChunks()", () => {
+    kb.upsertPage(makePage({ id: "1", content: "safe content" }));
+    kb.upsertChunks("1", [{ breadcrumb: "", heading: "H", depth: 1, content: "chunk content", index: 0 }]);
+    expect(() => kb.searchChunks('test* "quoted" (parens) ^caret')).not.toThrow();
+  });
+
+  it("returns empty results for empty query", () => {
+    kb.upsertPage(makePage({ id: "1", content: "some content" }));
+    expect(kb.search("")).toHaveLength(0);
+    expect(kb.search("   ")).toHaveLength(0);
+  });
+
+  it("still finds results after sanitization", () => {
+    kb.upsertPage(makePage({ id: "1", content: "authentication flow details" }));
+    const results = kb.search("authentication*");
+    expect(results.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// ── optimize + getDbSizeBytes ─────────────────────────────────────────────
+
+describe("optimize and getDbSizeBytes", () => {
+  it("optimize() runs without error", () => {
+    kb.upsertPage(makePage({ id: "1" }));
+    expect(() => kb.optimize()).not.toThrow();
+  });
+
+  it("getDbSizeBytes() returns a positive number for an existing DB", () => {
+    kb.upsertPage(makePage({ id: "1" }));
+    const size = kb.getDbSizeBytes();
+    expect(size).toBeGreaterThan(0);
+  });
+
+  it("getDbSizeBytes() returns a reasonable value", () => {
+    const size = kb.getDbSizeBytes();
+    // Even an empty DB with schema should be at least a few KB
+    expect(size).toBeGreaterThan(1000);
+    // And less than 10 MB for an empty test DB
+    expect(size).toBeLessThan(10 * 1024 * 1024);
   });
 });

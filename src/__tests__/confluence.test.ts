@@ -1,10 +1,10 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, mock } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, type Mock, vi } from "vitest";
 import { ConfluenceClient, htmlToMarkdown } from "../lib/confluence.js";
 
 // ── Fetch mock helpers ───────────────────────────────────────────────────────
 
 const originalFetch = globalThis.fetch;
-let fetchMock: ReturnType<typeof mock>;
+let fetchMock: Mock;
 
 function mockFetchResponse(body: unknown, status = 200) {
   fetchMock.mockResolvedValueOnce(
@@ -16,7 +16,7 @@ function mockFetchResponse(body: unknown, status = 200) {
 }
 
 beforeAll(() => {
-  fetchMock = mock(() => Promise.resolve(new Response("{}")));
+  fetchMock = vi.fn(() => Promise.resolve(new Response("{}")));
   globalThis.fetch = fetchMock as unknown as typeof fetch;
 });
 
@@ -275,7 +275,7 @@ describe("ConfluenceClient", () => {
         new Response("Not found", { status: 404, headers: { "Content-Type": "text/plain" } }),
       );
 
-      await expect(client.getSpaces()).rejects.toThrow("Confluence API 404");
+      await expect(client.getSpaces()).rejects.toThrow("Confluence API error (status 404)");
     });
   });
 });

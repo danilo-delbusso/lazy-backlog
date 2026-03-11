@@ -1,7 +1,7 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { KnowledgeBase } from "../lib/db.js";
 import { JiraClient, type JiraSchema, type JiraTicketInput, markdownToAdf } from "../lib/jira.js";
 
@@ -23,7 +23,7 @@ function getCallBody(callIndex: number): Record<string, unknown> {
 // ── Fetch mock helpers ───────────────────────────────────────────────────────
 
 const originalFetch = globalThis.fetch;
-let fetchMock: ReturnType<typeof mock>;
+let fetchMock: Mock;
 
 function mockFetchResponse(body: unknown, status = 200) {
   fetchMock.mockResolvedValueOnce(
@@ -39,7 +39,7 @@ function mockFetchError(status: number, body: string) {
 }
 
 beforeAll(() => {
-  fetchMock = mock(() => Promise.resolve(new Response("{}")));
+  fetchMock = vi.fn(() => Promise.resolve(new Response("{}")));
   globalThis.fetch = fetchMock as unknown as typeof fetch;
 });
 
@@ -587,6 +587,309 @@ describe("JiraClient", () => {
     });
   });
 
+  describe("searchIssues", () => {
+    it("returns parsed issues for valid JQL", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      mockFetchResponse({
+        issues: [
+          { key: "BP-1", id: "1", fields: { summary: "Issue 1", status: { name: "To Do" } } },
+          { key: "BP-2", id: "2", fields: { summary: "Issue 2", status: { name: "Done" } } },
+        ],
+        total: 2,
+      });
+
+      const result = await client.searchIssues("project = BP ORDER BY created DESC");
+      expect(result.issues).toHaveLength(2);
+      expect(result.total).toBe(2);
+      expect(result.issues[0]?.key).toBe("BP-1");
+    });
+
+    it("returns empty array for no matches", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      mockFetchResponse({ issues: [], total: 0 });
+
+      const result = await client.searchIssues("project = BP AND summary ~ nonexistent");
+      expect(result.issues).toHaveLength(0);
+      expect(result.total).toBe(0);
+    });
+
+    it("respects maxResults parameter", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      mockFetchResponse({ issues: [], total: 0 });
+
+      await client.searchIssues("project = BP", undefined, 10);
+      const call = fetchMock.mock.calls[0];
+      const url = new URL((call?.[0] ?? "") as string);
+      expect(url.searchParams.get("maxResults")).toBe("10");
+    });
+
+    it("handles 400 (invalid JQL)", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      mockFetchError(400, '{"errorMessages":["Invalid JQL"],"errors":{}}');
+
+      await expect(client.searchIssues("INVALID JQL !!!")).rejects.toThrow("Jira 400");
+    });
+  });
+
+  describe("listSprints", () => {
+    it("returns sprints for board", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      mockFetchResponse({
+        maxResults: 50,
+        startAt: 0,
+        isLast: true,
+        values: [
+          { id: 1, name: "Sprint 1", state: "active" },
+          { id: 2, name: "Sprint 2", state: "future" },
+        ],
+      });
+
+      const sprints = await client.listSprints("266");
+      expect(sprints).toHaveLength(2);
+      expect(sprints[0]?.name).toBe("Sprint 1");
+    });
+
+    it("filters by state parameter", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      mockFetchResponse({
+        maxResults: 50,
+        startAt: 0,
+        isLast: true,
+        values: [{ id: 1, name: "Sprint 1", state: "active" }],
+      });
+
+      await client.listSprints("266", "active");
+      const url = fetchMock.mock.calls[0]?.[0] as string;
+      expect(url).toContain("state=active");
+    });
+
+    it("handles pagination", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      mockFetchResponse({
+        maxResults: 1,
+        startAt: 0,
+        isLast: false,
+        values: [{ id: 1, name: "Sprint 1", state: "closed" }],
+      });
+      mockFetchResponse({
+        maxResults: 1,
+        startAt: 1,
+        isLast: true,
+        values: [{ id: 2, name: "Sprint 2", state: "active" }],
+      });
+
+      const sprints = await client.listSprints("266");
+      expect(sprints).toHaveLength(2);
+      expect(sprints[1]?.name).toBe("Sprint 2");
+    });
+
+    it("returns empty for board with no sprints", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      mockFetchResponse({
+        maxResults: 50,
+        startAt: 0,
+        isLast: true,
+        values: [],
+      });
+
+      const sprints = await client.listSprints("999");
+      expect(sprints).toHaveLength(0);
+    });
+  });
+
+  describe("getSprint", () => {
+    it("returns sprint details", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      mockFetchResponse({ id: 42, name: "Sprint 42", state: "active", goal: "Ship it" });
+
+      const sprint = await client.getSprint("42");
+      expect(sprint.id).toBe(42);
+      expect(sprint.name).toBe("Sprint 42");
+      expect(sprint.goal).toBe("Ship it");
+    });
+
+    it("throws for 404", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      mockFetchError(404, "Sprint not found");
+
+      await expect(client.getSprint("9999")).rejects.toThrow("Jira 404");
+    });
+  });
+
+  describe("getSprintIssues", () => {
+    it("returns issues with fields", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      mockFetchResponse({
+        issues: [{ key: "BP-10", id: "10", fields: { summary: "Sprint issue", status: { name: "To Do" } } }],
+        total: 1,
+        maxResults: 50,
+      });
+
+      const result = await client.getSprintIssues("42");
+      expect(result.issues).toHaveLength(1);
+      expect(result.total).toBe(1);
+      expect(result.issues[0]?.key).toBe("BP-10");
+    });
+
+    it("returns empty for sprint with no issues", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      mockFetchResponse({ issues: [], total: 0, maxResults: 50 });
+
+      const result = await client.getSprintIssues("42");
+      expect(result.issues).toHaveLength(0);
+      expect(result.total).toBe(0);
+    });
+  });
+
+  describe("createSprint", () => {
+    it("creates sprint with name and goal", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      mockFetchResponse({ id: 99, name: "New Sprint", state: "future", goal: "Deliver feature X" });
+
+      const sprint = await client.createSprint("266", "New Sprint", { goal: "Deliver feature X" });
+      expect(sprint.id).toBe(99);
+      expect(sprint.name).toBe("New Sprint");
+    });
+
+    it("sends correct body to API", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      mockFetchResponse({ id: 99, name: "S1", state: "future" });
+
+      await client.createSprint("266", "S1", {
+        goal: "Goal",
+        startDate: "2026-01-01",
+        endDate: "2026-01-14",
+      });
+
+      const body = getCallBody(0);
+      expect(body.name).toBe("S1");
+      expect(body.originBoardId).toBe("266");
+      expect(body.goal).toBe("Goal");
+      expect(body.startDate).toBe("2026-01-01");
+      expect(body.endDate).toBe("2026-01-14");
+    });
+  });
+
+  describe("moveIssuesToSprint", () => {
+    it("sends correct issue keys in body", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+      await client.moveIssuesToSprint("42", ["BP-1", "BP-2", "BP-3"]);
+
+      const body = getCallBody(0);
+      expect(body.issues).toEqual(["BP-1", "BP-2", "BP-3"]);
+    });
+  });
+
+  describe("getIssueChangelog", () => {
+    it("returns parsed changelog entries", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      mockFetchResponse({
+        maxResults: 50,
+        startAt: 0,
+        isLast: true,
+        values: [
+          {
+            id: "100",
+            author: { displayName: "Alice", accountId: "abc123" },
+            created: "2026-01-01T00:00:00Z",
+            items: [{ field: "status", fromString: "To Do", toString: "In Progress" }],
+          },
+        ],
+      });
+
+      const entries = await client.getIssueChangelog("BP-1");
+      expect(entries).toHaveLength(1);
+      expect(entries[0]?.author.displayName).toBe("Alice");
+      expect(entries[0]?.items[0]?.field).toBe("status");
+    });
+
+    it("handles pagination", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      mockFetchResponse({
+        maxResults: 1,
+        startAt: 0,
+        isLast: false,
+        values: [
+          {
+            id: "1",
+            author: { displayName: "A", accountId: "a" },
+            created: "2026-01-01T00:00:00Z",
+            items: [{ field: "status", fromString: "To Do", toString: "In Progress" }],
+          },
+        ],
+      });
+      mockFetchResponse({
+        maxResults: 1,
+        startAt: 1,
+        isLast: true,
+        values: [
+          {
+            id: "2",
+            author: { displayName: "B", accountId: "b" },
+            created: "2026-01-02T00:00:00Z",
+            items: [{ field: "priority", fromString: "Medium", toString: "High" }],
+          },
+        ],
+      });
+
+      const entries = await client.getIssueChangelog("BP-1");
+      expect(entries).toHaveLength(2);
+    });
+
+    it("returns empty for no changes", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      mockFetchResponse({
+        maxResults: 50,
+        startAt: 0,
+        isLast: true,
+        values: [],
+      });
+
+      const entries = await client.getIssueChangelog("BP-1");
+      expect(entries).toHaveLength(0);
+    });
+  });
+
+  describe("addComment", () => {
+    it("posts ADF-formatted comment", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      mockFetchResponse({});
+
+      await client.addComment("BP-1", "This is a **comment**");
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const url = fetchMock.mock.calls[0]?.[0] as string;
+      expect(url).toContain("/rest/api/3/issue/BP-1/comment");
+    });
+
+    it("includes ADF body in request", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      mockFetchResponse({});
+
+      await client.addComment("BP-1", "Hello world");
+
+      const body = getCallBody(0);
+      expect(body.body).toHaveProperty("type", "doc");
+      expect((body.body as Record<string, unknown>).version).toBe(1);
+    });
+  });
+
+  describe("addLabels", () => {
+    it("sends label add operations", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+      await client.addLabels("BP-1", ["tech-debt", "urgent"]);
+
+      const body = getCallBody(0);
+      expect(body.update).toEqual({
+        labels: [{ add: "tech-debt" }, { add: "urgent" }],
+      });
+    });
+  });
+
   describe("loadSchema", () => {
     it("returns null for undefined path", () => {
       expect(JiraClient.loadSchema()).toBeNull();
@@ -594,6 +897,381 @@ describe("JiraClient", () => {
 
     it("returns null for nonexistent file", () => {
       expect(JiraClient.loadSchema("/tmp/nonexistent-schema.json")).toBeNull();
+    });
+  });
+
+  describe("input validation", () => {
+    it("rejects invalid issue keys", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      await expect(client.getIssue("bad-key")).rejects.toThrow("Invalid issue key");
+      await expect(client.getIssue("123-ABC")).rejects.toThrow("Invalid issue key");
+      await expect(client.getIssue("BP 1")).rejects.toThrow("Invalid issue key");
+      await expect(client.getIssue("")).rejects.toThrow("Invalid issue key");
+    });
+
+    it("rejects siteUrl without https://", () => {
+      expect(() => new JiraClient({ ...testConfig, siteUrl: "http://test.atlassian.net" }, testSchema)).toThrow(
+        "siteUrl must start with https://",
+      );
+    });
+
+    it("rejects siteUrl pointing to private IP ranges (SSRF)", () => {
+      const privateUrls = [
+        "https://localhost",
+        "https://127.0.0.1",
+        "https://10.0.0.1",
+        "https://172.16.0.1",
+        "https://172.31.255.255",
+        "https://192.168.1.1",
+      ];
+      for (const url of privateUrls) {
+        expect(() => new JiraClient({ ...testConfig, siteUrl: url }, testSchema)).toThrow(
+          "siteUrl must not point to a private/internal address",
+        );
+      }
+    });
+
+    it("allows valid public https URLs", () => {
+      expect(
+        () => new JiraClient({ ...testConfig, siteUrl: "https://mycompany.atlassian.net" }, testSchema),
+      ).not.toThrow();
+    });
+  });
+
+  describe("retry/backoff", () => {
+    it("retries on 429 with Retry-After header", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+
+      // First call: 429 with Retry-After
+      fetchMock.mockResolvedValueOnce(new Response("", { status: 429, headers: { "Retry-After": "1" } }));
+      // Second call: success
+      mockFetchResponse({ id: "1", key: "BP-1", self: "" });
+
+      const result = await client.createIssue({ summary: "Retry test", issueType: "Task" });
+      expect(result.key).toBe("BP-1");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("retries on 500 with exponential backoff", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+
+      // First call: 500
+      fetchMock.mockResolvedValueOnce(new Response("Server Error", { status: 500 }));
+      // Second call: 500
+      fetchMock.mockResolvedValueOnce(new Response("Server Error", { status: 500 }));
+      // Third call: success
+      mockFetchResponse({ id: "1", key: "BP-1", self: "" });
+
+      const result = await client.createIssue({ summary: "Backoff test", issueType: "Task" });
+      expect(result.key).toBe("BP-1");
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    });
+
+    it("throws after exhausting retries on 500", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+
+      // All 4 calls return 500 (0..3 = 4 attempts)
+      for (let i = 0; i <= 3; i++) {
+        fetchMock.mockResolvedValueOnce(new Response("Server Error", { status: 500 }));
+      }
+
+      await expect(client.createIssue({ summary: "Fail test", issueType: "Task" })).rejects.toThrow("Jira 500");
+    }, 15_000);
+  });
+
+  describe("transitionIssue", () => {
+    it("posts transition to correct endpoint", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+      await client.transitionIssue("BP-1", "31");
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const url = fetchMock.mock.calls[0]?.[0] as string;
+      expect(url).toContain("/rest/api/3/issue/BP-1/transitions");
+      const body = getCallBody(0);
+      expect(body.transition).toEqual({ id: "31" });
+    });
+  });
+
+  describe("assignIssue", () => {
+    it("assigns issue to a user", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+      await client.assignIssue("BP-1", "abc-123");
+
+      const url = fetchMock.mock.calls[0]?.[0] as string;
+      expect(url).toContain("/rest/api/3/issue/BP-1/assignee");
+      const body = getCallBody(0);
+      expect(body.accountId).toBe("abc-123");
+    });
+
+    it("unassigns issue with null accountId", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+      await client.assignIssue("BP-1", null);
+
+      const body = getCallBody(0);
+      expect(body.accountId).toBeNull();
+    });
+  });
+
+  describe("linkIssues", () => {
+    it("creates issue link with correct body", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+      await client.linkIssues("BP-1", "BP-2", "Blocks");
+
+      const body = getCallBody(0);
+      expect(body.type).toEqual({ name: "Blocks" });
+      expect(body.inwardIssue).toEqual({ key: "BP-1" });
+      expect(body.outwardIssue).toEqual({ key: "BP-2" });
+    });
+
+    it("validates both issue keys", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      await expect(client.linkIssues("bad", "BP-2", "Blocks")).rejects.toThrow("Invalid issue key");
+      await expect(client.linkIssues("BP-1", "bad", "Blocks")).rejects.toThrow("Invalid issue key");
+    });
+  });
+
+  describe("rankIssue", () => {
+    it("ranks issue before another issue", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+      await client.rankIssue("BP-1", { rankBefore: "BP-2" });
+
+      const url = fetchMock.mock.calls[0]?.[0] as string;
+      expect(url).toContain("/rest/agile/1.0/issue/rank");
+      const body = getCallBody(0);
+      expect(body.issues).toEqual(["BP-1"]);
+      expect(body.rankBeforeIssue).toBe("BP-2");
+      expect(body.rankAfterIssue).toBeUndefined();
+    });
+
+    it("ranks issue after another issue", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+      await client.rankIssue("BP-3", { rankAfter: "BP-4" });
+
+      const body = getCallBody(0);
+      expect(body.issues).toEqual(["BP-3"]);
+      expect(body.rankAfterIssue).toBe("BP-4");
+      expect(body.rankBeforeIssue).toBeUndefined();
+    });
+
+    it("throws if neither rankBefore nor rankAfter provided", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+
+      await expect(client.rankIssue("BP-1", {})).rejects.toThrow(
+        "rankIssue requires exactly one of rankBefore or rankAfter",
+      );
+    });
+
+    it("validates all issue keys", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      await expect(client.rankIssue("bad", { rankBefore: "BP-1" })).rejects.toThrow("Invalid issue key");
+      await expect(client.rankIssue("BP-1", { rankBefore: "bad" })).rejects.toThrow("Invalid issue key");
+      await expect(client.rankIssue("BP-1", { rankAfter: "bad" })).rejects.toThrow("Invalid issue key");
+    });
+  });
+
+  describe("getBacklogIssues", () => {
+    it("fetches backlog issues for a board", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      mockFetchResponse({
+        issues: [
+          { key: "BP-1", fields: { summary: "First" } },
+          { key: "BP-2", fields: { summary: "Second" } },
+        ],
+        total: 2,
+        maxResults: 50,
+      });
+
+      const result = await client.getBacklogIssues("266", 50, 0);
+      expect(result.issues).toHaveLength(2);
+      expect(result.total).toBe(2);
+      expect(result.issues[0]?.key).toBe("BP-1");
+
+      const call = fetchMock.mock.calls[0];
+      const url = new URL((call?.[0] ?? "") as string);
+      expect(url.pathname).toContain("/rest/agile/1.0/board/266/backlog");
+      expect(url.searchParams.get("maxResults")).toBe("50");
+    });
+
+    it("supports pagination with startAt", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      mockFetchResponse({
+        issues: [{ key: "BP-99", fields: { summary: "Last" } }],
+        total: 100,
+        maxResults: 1,
+      });
+
+      const result = await client.getBacklogIssues("266", 1, 99);
+      expect(result.issues).toHaveLength(1);
+      expect(result.issues[0]?.key).toBe("BP-99");
+
+      const call = fetchMock.mock.calls[0];
+      const url = new URL((call?.[0] ?? "") as string);
+      expect(url.searchParams.get("startAt")).toBe("99");
+      expect(url.searchParams.get("maxResults")).toBe("1");
+    });
+  });
+
+  describe("getIssueLinks", () => {
+    it("parses inward and outward links correctly", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      mockFetchResponse({
+        fields: {
+          issuelinks: [
+            {
+              type: { name: "Blocks" },
+              inwardIssue: {
+                key: "BP-10",
+                fields: { summary: "Blocker issue", status: { name: "To Do" } },
+              },
+            },
+            {
+              type: { name: "Relates" },
+              outwardIssue: {
+                key: "BP-20",
+                fields: { summary: "Related issue", status: { name: "Done" } },
+              },
+            },
+          ],
+        },
+      });
+
+      const links = await client.getIssueLinks("BP-1");
+      expect(links).toHaveLength(2);
+      expect(links[0]).toEqual({
+        type: "Blocks",
+        direction: "inward",
+        linkedIssue: { key: "BP-10", summary: "Blocker issue", status: "To Do" },
+      });
+      expect(links[1]).toEqual({
+        type: "Relates",
+        direction: "outward",
+        linkedIssue: { key: "BP-20", summary: "Related issue", status: "Done" },
+      });
+    });
+
+    it("returns empty array when no links exist", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      mockFetchResponse({ fields: { issuelinks: [] } });
+
+      const links = await client.getIssueLinks("BP-1");
+      expect(links).toHaveLength(0);
+    });
+
+    it("validates issue key", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      await expect(client.getIssueLinks("bad")).rejects.toThrow("Invalid issue key");
+    });
+  });
+
+  describe("getEpicIssues", () => {
+    it("returns child issues of an epic", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      mockFetchResponse({
+        issues: [
+          { key: "BP-5", id: "5", fields: { summary: "Child 1", status: { name: "To Do" } } },
+          { key: "BP-6", id: "6", fields: { summary: "Child 2", status: { name: "In Progress" } } },
+        ],
+        total: 2,
+      });
+
+      const issues = await client.getEpicIssues("BP-1");
+      expect(issues).toHaveLength(2);
+      expect(issues[0]?.key).toBe("BP-5");
+      expect(issues[1]?.key).toBe("BP-6");
+
+      // Verify the JQL used
+      const call = fetchMock.mock.calls[0];
+      const url = new URL((call?.[0] ?? "") as string);
+      expect(url.searchParams.get("jql")).toBe('"Epic Link" = BP-1 OR parent = BP-1');
+    });
+
+    it("validates epic key", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      await expect(client.getEpicIssues("bad")).rejects.toThrow("Invalid issue key");
+    });
+  });
+
+  describe("getSprintDetails", () => {
+    it("returns sprint with goal", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      mockFetchResponse({
+        id: 42,
+        name: "Sprint 42",
+        state: "active",
+        goal: "Ship auth feature",
+        startDate: "2026-01-01T00:00:00Z",
+        endDate: "2026-01-14T00:00:00Z",
+      });
+
+      const sprint = await client.getSprintDetails("42");
+      expect(sprint.id).toBe(42);
+      expect(sprint.name).toBe("Sprint 42");
+      expect(sprint.state).toBe("active");
+      expect(sprint.goal).toBe("Ship auth feature");
+      expect(sprint.startDate).toBe("2026-01-01T00:00:00Z");
+      expect(sprint.endDate).toBe("2026-01-14T00:00:00Z");
+
+      const url = fetchMock.mock.calls[0]?.[0] as string;
+      expect(url).toContain("/rest/agile/1.0/sprint/42");
+    });
+
+    it("returns sprint without optional fields", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      mockFetchResponse({ id: 10, name: "Sprint 10", state: "future" });
+
+      const sprint = await client.getSprintDetails("10");
+      expect(sprint.id).toBe(10);
+      expect(sprint.goal).toBeUndefined();
+      expect(sprint.startDate).toBeUndefined();
+      expect(sprint.endDate).toBeUndefined();
+    });
+  });
+
+  describe("updateSprint", () => {
+    it("sends correct PUT request with updates", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+      await client.updateSprint("42", {
+        goal: "New goal",
+        name: "Renamed Sprint",
+        startDate: "2026-02-01",
+        endDate: "2026-02-14",
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const url = fetchMock.mock.calls[0]?.[0] as string;
+      expect(url).toContain("/rest/agile/1.0/sprint/42");
+      const call = fetchMock.mock.calls[0];
+      expect(call?.[1]?.method).toBe("PUT");
+      const body = getCallBody(0);
+      expect(body.goal).toBe("New goal");
+      expect(body.name).toBe("Renamed Sprint");
+      expect(body.startDate).toBe("2026-02-01");
+      expect(body.endDate).toBe("2026-02-14");
+    });
+
+    it("sends only provided fields", async () => {
+      const client = new JiraClient(testConfig, testSchema);
+      fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+      await client.updateSprint("42", { goal: "Just the goal" });
+
+      const body = getCallBody(0);
+      expect(body.goal).toBe("Just the goal");
+      expect(body.name).toBeUndefined();
     });
   });
 

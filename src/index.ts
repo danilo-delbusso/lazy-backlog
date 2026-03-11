@@ -1,12 +1,17 @@
 #!/usr/bin/env node
+import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { KnowledgeBase } from "./lib/db.js";
-import { registerContextTools } from "./tools/context.js";
-import { registerSpiderTools } from "./tools/spider.js";
-import { registerTicketTools } from "./tools/tickets.js";
+import { registerBacklogTool } from "./tools/backlog.js";
+import { registerBugsTool } from "./tools/bugs.js";
+import { registerConfigureTool } from "./tools/configure.js";
+import { registerConfluenceTool } from "./tools/confluence.js";
+import { registerIssuesTool } from "./tools/issues.js";
+import { registerSprintsTool } from "./tools/sprints.js";
 
-const server = new McpServer({ name: "lazy-backlog", version: "0.1.0" }, { capabilities: { logging: {} } });
+const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf-8")) as { version: string };
+const server = new McpServer({ name: "lazy-backlog", version: pkg.version }, { capabilities: { logging: {} } });
 
 // Lazy-init knowledge base
 let kb: KnowledgeBase | null = null;
@@ -15,10 +20,13 @@ function getKb(): KnowledgeBase {
   return kb;
 }
 
-// Register tool groups
-registerSpiderTools(server, getKb);
-registerContextTools(server, getKb);
-registerTicketTools(server, getKb);
+// Register consolidated tools (6 tools with action-based routing)
+registerConfigureTool(server, getKb);
+registerConfluenceTool(server, getKb);
+registerBacklogTool(server, getKb);
+registerBugsTool(server, getKb);
+registerIssuesTool(server, getKb);
+registerSprintsTool(server, getKb);
 
 // Graceful shutdown
 function shutdown() {
