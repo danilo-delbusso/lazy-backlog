@@ -39,6 +39,13 @@ vi.mock("../lib/team-rules.js", async (importOriginal) => {
   return {
     ...actual,
     analyzeBacklog: (...args: unknown[]) => mockAnalyzeBacklog(...(args as [unknown, unknown])),
+  };
+});
+
+vi.mock("../lib/adf.js", async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...actual,
     adfToText: (...args: unknown[]) => mockAdfToText(...(args as [unknown])),
   };
 });

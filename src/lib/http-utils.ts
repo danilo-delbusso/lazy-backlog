@@ -24,6 +24,23 @@ export interface FetchWithRetryOptions {
   label?: string;
 }
 
+/** Compute the backoff delay for a given attempt (exponential). */
+function backoffMs(attempt: number): number {
+  return INITIAL_BACKOFF_MS * (1 << attempt);
+}
+
+/** Determine whether a response should be retried and the delay to wait. */
+function retryDelay(res: Response, attempt: number): number | null {
+  if (res.status === 429) {
+    const retryAfter = res.headers.get("Retry-After");
+    return retryAfter ? Number.parseInt(retryAfter, 10) * 1000 : backoffMs(attempt);
+  }
+  if (RETRYABLE_STATUSES.has(res.status) && attempt < MAX_RETRIES) {
+    return backoffMs(attempt);
+  }
+  return null;
+}
+
 /**
  * Fetch with exponential backoff retry for 429 and 5xx responses.
  *
@@ -44,30 +61,23 @@ export async function fetchWithRetry(url: string, options: FetchWithRetryOptions
       res = await fetch(url, {
         method,
         headers,
-        body: body !== undefined ? JSON.stringify(body) : undefined,
+        body: body === undefined ? undefined : JSON.stringify(body),
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (err: unknown) {
       // Network or timeout error — retry if attempts remain
       lastError = err instanceof Error ? err : new Error(String(err));
       if (attempt < MAX_RETRIES) {
-        await _internals.sleep(INITIAL_BACKOFF_MS * (1 << attempt));
+        await _internals.sleep(backoffMs(attempt));
         continue;
       }
       throw lastError;
     }
 
-    if (res.status === 429) {
-      const retryAfter = res.headers.get("Retry-After");
-      const waitMs = retryAfter ? Number.parseInt(retryAfter, 10) * 1000 : INITIAL_BACKOFF_MS * (1 << attempt);
-      await _internals.sleep(waitMs);
-      lastError = new Error(`${label} 429 ${method} ${url}`);
-      continue;
-    }
-
-    if (RETRYABLE_STATUSES.has(res.status) && attempt < MAX_RETRIES) {
-      await _internals.sleep(INITIAL_BACKOFF_MS * (1 << attempt));
+    const delay = retryDelay(res, attempt);
+    if (delay != null) {
       lastError = new Error(`${label} ${res.status} ${method} ${url}`);
+      await _internals.sleep(delay);
       continue;
     }
 

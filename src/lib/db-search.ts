@@ -14,7 +14,7 @@ const FTS5_OPERATORS = /\b(NEAR|AND|OR|NOT)\b/gi;
  * Returns empty string for empty/whitespace-only input.
  */
 export function sanitizeFtsQuery(query: string): string {
-  const stripped = query.replace(FTS5_SPECIAL_CHARS, " ").replace(FTS5_OPERATORS, " ");
+  const stripped = query.replaceAll(FTS5_SPECIAL_CHARS, " ").replaceAll(FTS5_OPERATORS, " ");
   const words = stripped.split(/\s+/).filter((w) => w.length > 0);
   if (words.length === 0) return "";
   return words.map((w) => `"${w}"`).join(" ");

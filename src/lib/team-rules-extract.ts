@@ -16,7 +16,6 @@ import { mean, pct, scoreTicketQuality, topN } from "./team-rules-utils.js";
  */
 export function extractLabelRules(tickets: TicketData[]): TeamRule[] {
   if (tickets.length === 0) return [];
-  const rules: TeamRule[] = [];
   const n = tickets.length;
   const labelFreq = new Map<string, number>();
   let totalLabels = 0;
@@ -35,34 +34,34 @@ export function extractLabelRules(tickets: TicketData[]): TeamRule[] {
     percentage: `${pct(e.count, n)}%`,
   }));
 
-  rules.push({
-    category: "label_patterns",
-    rule_key: "top_labels",
-    issue_type: null,
-    rule_value: JSON.stringify(topLabels),
-    confidence: Math.min(1, n / 30),
-    sample_size: n,
-  });
+  const confidence = Math.min(1, n / 30);
 
-  rules.push({
-    category: "label_patterns",
-    rule_key: "avg_per_ticket",
-    issue_type: null,
-    rule_value: (totalLabels / Math.max(n, 1)).toFixed(1),
-    confidence: Math.min(1, n / 30),
-    sample_size: n,
-  });
-
-  rules.push({
-    category: "label_patterns",
-    rule_key: "usage_rate",
-    issue_type: null,
-    rule_value: `${pct(ticketsWithLabels, n)}%`,
-    confidence: Math.min(1, n / 30),
-    sample_size: n,
-  });
-
-  return rules;
+  return [
+    {
+      category: "label_patterns",
+      rule_key: "top_labels",
+      issue_type: null,
+      rule_value: JSON.stringify(topLabels),
+      confidence,
+      sample_size: n,
+    },
+    {
+      category: "label_patterns",
+      rule_key: "avg_per_ticket",
+      issue_type: null,
+      rule_value: (totalLabels / Math.max(n, 1)).toFixed(1),
+      confidence,
+      sample_size: n,
+    },
+    {
+      category: "label_patterns",
+      rule_key: "usage_rate",
+      issue_type: null,
+      rule_value: `${pct(ticketsWithLabels, n)}%`,
+      confidence,
+      sample_size: n,
+    },
+  ];
 }
 
 // ─── Component extraction ───────────────────────────────────────────────────────
@@ -72,7 +71,6 @@ export function extractLabelRules(tickets: TicketData[]): TeamRule[] {
  */
 export function extractComponentRules(tickets: TicketData[]): TeamRule[] {
   if (tickets.length === 0) return [];
-  const rules: TeamRule[] = [];
   const n = tickets.length;
   const compFreq = new Map<string, number>();
   let ticketsWithComp = 0;
@@ -89,99 +87,86 @@ export function extractComponentRules(tickets: TicketData[]): TeamRule[] {
     percentage: `${pct(e.count, n)}%`,
   }));
 
-  rules.push({
-    category: "component_patterns",
-    rule_key: "top_components",
-    issue_type: null,
-    rule_value: JSON.stringify(topComps),
-    confidence: Math.min(1, n / 30),
-    sample_size: n,
-  });
+  const confidence = Math.min(1, n / 30);
 
-  rules.push({
-    category: "component_patterns",
-    rule_key: "usage_rate",
-    issue_type: null,
-    rule_value: `${pct(ticketsWithComp, n)}%`,
-    confidence: Math.min(1, n / 30),
-    sample_size: n,
-  });
-
-  return rules;
+  return [
+    {
+      category: "component_patterns",
+      rule_key: "top_components",
+      issue_type: null,
+      rule_value: JSON.stringify(topComps),
+      confidence,
+      sample_size: n,
+    },
+    {
+      category: "component_patterns",
+      rule_key: "usage_rate",
+      issue_type: null,
+      rule_value: `${pct(ticketsWithComp, n)}%`,
+      confidence,
+      sample_size: n,
+    },
+  ];
 }
 
-// ─── Workflow extraction ────────────────────────────────────────────────────────
+// ─── Workflow helpers ────────────────────────────────────────────────────────────
 
-/**
- * Extract workflow transition rules from ticket changelogs.
- * Identifies the happy path, avg time per status, and bottlenecks.
- */
-export function extractWorkflowRules(tickets: TicketData[]): TeamRule[] {
-  const withChangelog = tickets.filter((t) => t.changelog.length > 0);
-  if (withChangelog.length === 0) return [];
+/** Build status sequence and time-in-status data from a single ticket's changelog. */
+function processTicketWorkflow(
+  t: TicketData,
+  statusTimeMap: Map<string, number[]>,
+  sequenceFreq: Map<string, number>,
+  totalLeadTimes: number[],
+): void {
+  const transitions = t.changelog
+    .filter((c) => c.field === "status")
+    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
-  const rules: TeamRule[] = [];
-  const statusTimeMap = new Map<string, number[]>(); // status -> durations in ms
-  const sequenceFreq = new Map<string, number>();
-  const totalLeadTimes: number[] = [];
+  if (transitions.length === 0) return;
 
-  for (const t of withChangelog) {
-    const transitions = t.changelog
-      .filter((c) => c.field === "status")
-      .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-
-    if (transitions.length === 0) continue;
-
-    // Build sequence
-    const statuses: string[] = [];
-    if (transitions[0]?.from) statuses.push(transitions[0].from);
-    for (const tr of transitions) {
-      if (tr.to) statuses.push(tr.to);
-    }
-    if (statuses.length > 1) {
-      sequenceFreq.set(statuses.join(" → "), (sequenceFreq.get(statuses.join(" → ")) ?? 0) + 1);
-    }
-
-    // Calculate time in each status
-    let prevTime = new Date(t.created).getTime();
-    let prevStatus = transitions[0]?.from ?? "Unknown";
-
-    for (const tr of transitions) {
-      const trTime = new Date(tr.timestamp).getTime();
-      const duration = trTime - prevTime;
-      if (duration >= 0) {
-        const arr = statusTimeMap.get(prevStatus);
-        if (arr) arr.push(duration);
-        else statusTimeMap.set(prevStatus, [duration]);
-      }
-      prevTime = trTime;
-      prevStatus = tr.to ?? "Unknown";
-    }
-
-    // Total lead time
-    const firstTime = new Date(t.created).getTime();
-    const lastTime = t.resolutionDate
-      ? new Date(t.resolutionDate).getTime()
-      : new Date((transitions[transitions.length - 1] ?? transitions[0])?.timestamp ?? t.created).getTime();
-    if (lastTime > firstTime) {
-      totalLeadTimes.push(lastTime - firstTime);
-    }
+  // Build sequence
+  const statuses: string[] = [];
+  if (transitions[0]?.from) statuses.push(transitions[0].from);
+  for (const tr of transitions) {
+    if (tr.to) statuses.push(tr.to);
+  }
+  if (statuses.length > 1) {
+    const seq = statuses.join(" → ");
+    sequenceFreq.set(seq, (sequenceFreq.get(seq) ?? 0) + 1);
   }
 
-  // Happy path (most common sequence)
-  const happyPath = topN(sequenceFreq, 1)[0];
-  if (happyPath) {
-    rules.push({
-      category: "workflow",
-      rule_key: "happy_path",
-      issue_type: null,
-      rule_value: JSON.stringify(happyPath.value.split(" → ")),
-      confidence: happyPath.count / withChangelog.length,
-      sample_size: withChangelog.length,
-    });
+  // Calculate time in each status
+  let prevTime = new Date(t.created).getTime();
+  let prevStatus = transitions[0]?.from ?? "Unknown";
+
+  for (const tr of transitions) {
+    const trTime = new Date(tr.timestamp).getTime();
+    const duration = trTime - prevTime;
+    if (duration >= 0) {
+      const arr = statusTimeMap.get(prevStatus);
+      if (arr) arr.push(duration);
+      else statusTimeMap.set(prevStatus, [duration]);
+    }
+    prevTime = trTime;
+    prevStatus = tr.to ?? "Unknown";
   }
 
-  // Avg days per status
+  // Total lead time
+  const firstTime = new Date(t.created).getTime();
+  const lastTransition = transitions.at(-1) ?? transitions[0];
+  const lastTime = t.resolutionDate
+    ? new Date(t.resolutionDate).getTime()
+    : new Date(lastTransition?.timestamp ?? t.created).getTime();
+  if (lastTime > firstTime) {
+    totalLeadTimes.push(lastTime - firstTime);
+  }
+}
+
+/** Find the bottleneck status and build avg days per status. */
+function computeStatusMetrics(statusTimeMap: Map<string, number[]>): {
+  avgDaysPerStatus: Record<string, string>;
+  bottleneck: string;
+} {
   const msPerDay = 86400000;
   const avgDaysPerStatus: Record<string, string> = {};
   let bottleneck = "";
@@ -196,13 +181,53 @@ export function extractWorkflowRules(tickets: TicketData[]): TeamRule[] {
     }
   }
 
+  return { avgDaysPerStatus, bottleneck };
+}
+
+// ─── Workflow extraction ────────────────────────────────────────────────────────
+
+/**
+ * Extract workflow transition rules from ticket changelogs.
+ * Identifies the happy path, avg time per status, and bottlenecks.
+ */
+export function extractWorkflowRules(tickets: TicketData[]): TeamRule[] {
+  const withChangelog = tickets.filter((t) => t.changelog.length > 0);
+  if (withChangelog.length === 0) return [];
+
+  const rules: TeamRule[] = [];
+  const statusTimeMap = new Map<string, number[]>();
+  const sequenceFreq = new Map<string, number>();
+  const totalLeadTimes: number[] = [];
+
+  for (const t of withChangelog) {
+    processTicketWorkflow(t, statusTimeMap, sequenceFreq, totalLeadTimes);
+  }
+
+  const n = withChangelog.length;
+  const confidence = Math.min(1, n / 20);
+
+  // Happy path (most common sequence)
+  const happyPath = topN(sequenceFreq, 1)[0];
+  if (happyPath) {
+    rules.push({
+      category: "workflow",
+      rule_key: "happy_path",
+      issue_type: null,
+      rule_value: JSON.stringify(happyPath.value.split(" → ")),
+      confidence: happyPath.count / n,
+      sample_size: n,
+    });
+  }
+
+  const { avgDaysPerStatus, bottleneck } = computeStatusMetrics(statusTimeMap);
+
   rules.push({
     category: "workflow",
     rule_key: "avg_days_per_status",
     issue_type: null,
     rule_value: JSON.stringify(avgDaysPerStatus),
-    confidence: Math.min(1, withChangelog.length / 20),
-    sample_size: withChangelog.length,
+    confidence,
+    sample_size: n,
   });
 
   if (bottleneck) {
@@ -211,13 +236,14 @@ export function extractWorkflowRules(tickets: TicketData[]): TeamRule[] {
       rule_key: "bottleneck",
       issue_type: null,
       rule_value: bottleneck,
-      confidence: Math.min(1, withChangelog.length / 20),
-      sample_size: withChangelog.length,
+      confidence,
+      sample_size: n,
     });
   }
 
   // Avg total lead time
   if (totalLeadTimes.length > 0) {
+    const msPerDay = 86400000;
     rules.push({
       category: "workflow",
       rule_key: "avg_total_days",
@@ -238,7 +264,6 @@ export function extractWorkflowRules(tickets: TicketData[]): TeamRule[] {
  */
 export function extractSprintCompositionRules(tickets: TicketData[]): TeamRule[] {
   if (tickets.length === 0) return [];
-  const rules: TeamRule[] = [];
   const n = tickets.length;
   const typeCounts = new Map<string, number>();
 
@@ -251,28 +276,27 @@ export function extractSprintCompositionRules(tickets: TicketData[]): TeamRule[]
     typeMix[type] = `${pct(count, n)}%`;
   }
 
-  rules.push({
-    category: "sprint_composition",
-    rule_key: "type_mix",
-    issue_type: null,
-    rule_value: JSON.stringify(typeMix),
-    confidence: Math.min(1, n / 30),
-    sample_size: n,
-  });
-
   const pointed = tickets.filter((t) => t.storyPoints != null && t.storyPoints > 0);
   const avgPts = pointed.length > 0 ? mean(pointed.map((t) => t.storyPoints ?? 0)).toFixed(1) : "0";
 
-  rules.push({
-    category: "sprint_composition",
-    rule_key: "avg_points_per_ticket",
-    issue_type: null,
-    rule_value: avgPts,
-    confidence: Math.min(1, pointed.length / 20),
-    sample_size: pointed.length,
-  });
-
-  return rules;
+  return [
+    {
+      category: "sprint_composition",
+      rule_key: "type_mix",
+      issue_type: null,
+      rule_value: JSON.stringify(typeMix),
+      confidence: Math.min(1, n / 30),
+      sample_size: n,
+    },
+    {
+      category: "sprint_composition",
+      rule_key: "avg_points_per_ticket",
+      issue_type: null,
+      rule_value: avgPts,
+      confidence: Math.min(1, pointed.length / 20),
+      sample_size: pointed.length,
+    },
+  ];
 }
 
 // ─── Main orchestrator ──────────────────────────────────────────────────────────

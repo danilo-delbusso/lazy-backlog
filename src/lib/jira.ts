@@ -366,7 +366,8 @@ export class JiraClient {
     for (const f of ts.fields) {
       let line = `- **${f.name}** (${f.id}) [${f.type}] — ${f.required ? "**REQUIRED**" : "optional"}`;
       if (f.allowedValues?.length) {
-        line += `\n  Values: ${f.allowedValues.map((v) => `\`${v.name}\``).join(", ")}`;
+        const vals = f.allowedValues.map((v) => `\`${v.name}\``).join(", ");
+        line += `\n  Values: ${vals}`;
       }
       lines.push(line);
     }
@@ -378,8 +379,8 @@ export class JiraClient {
   }
 
   // ── Static: Schema (delegated to jira-schema.ts) ──
-  static discoverSchema = discoverSchema;
-  static loadSchema = loadSchema;
-  static loadSchemaFromDb = loadSchemaFromDb;
-  static saveSchemaToDb = saveSchemaToDb;
+  static readonly discoverSchema = discoverSchema;
+  static readonly loadSchema = loadSchema;
+  static readonly loadSchemaFromDb = loadSchemaFromDb;
+  static readonly saveSchemaToDb = saveSchemaToDb;
 }

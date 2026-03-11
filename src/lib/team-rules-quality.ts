@@ -27,6 +27,63 @@ import {
 // Re-export adfToText so existing `import { adfToText } from "team-rules"` paths keep working.
 export { adfToText } from "./adf.js";
 
+// ─── Description structure helpers ───────────────────────────────────────────────
+
+/** Collect heading frequencies and structured ticket counts from a group. */
+function analyzeDescriptions(group: TicketData[]) {
+  const headingFreq = new Map<string, number>();
+  let structuredCount = 0;
+  let checkboxCount = 0;
+  let gherkinCount = 0;
+  let bulletCount = 0;
+  let totalLength = 0;
+
+  for (const t of group) {
+    const desc = t.description ?? "";
+    totalLength += desc.length;
+
+    const ticketHeadings = collectHeadings(desc, headingFreq);
+    if (ticketHeadings.length > 0) structuredCount++;
+    if (CHECKBOX_RE.test(desc)) checkboxCount++;
+    if (GHERKIN_RE.test(desc)) gherkinCount++;
+    if (BULLET_RE.test(desc)) bulletCount++;
+  }
+
+  return { headingFreq, structuredCount, checkboxCount, gherkinCount, bulletCount, totalLength };
+}
+
+/** Extract headings from a description and update frequency map. */
+function collectHeadings(desc: string, headingFreq: Map<string, number>): string[] {
+  const ticketHeadings: string[] = [];
+  let m: RegExpExecArray | null;
+
+  HEADING_RE.lastIndex = 0;
+  for (m = HEADING_RE.exec(desc); m !== null; m = HEADING_RE.exec(desc)) {
+    const h = m[1]?.trim().toLowerCase() ?? "";
+    ticketHeadings.push(h);
+    headingFreq.set(h, (headingFreq.get(h) ?? 0) + 1);
+  }
+
+  BOLD_SECTION_RE.lastIndex = 0;
+  for (m = BOLD_SECTION_RE.exec(desc); m !== null; m = BOLD_SECTION_RE.exec(desc)) {
+    const h = m[1]?.trim().toLowerCase() ?? "";
+    ticketHeadings.push(h);
+    headingFreq.set(h, (headingFreq.get(h) ?? 0) + 1);
+  }
+
+  return ticketHeadings;
+}
+
+/** Determine the dominant acceptance-criteria format. */
+function detectAcFormat(checkboxCount: number, gherkinCount: number, bulletCount: number): string {
+  const maxAc = Math.max(checkboxCount, gherkinCount, bulletCount);
+  if (maxAc === 0) return "none";
+  if (checkboxCount === maxAc && gherkinCount === maxAc) return "mixed";
+  if (checkboxCount === maxAc) return "checkbox";
+  if (gherkinCount === maxAc) return "gherkin";
+  return "bullet";
+}
+
 // ─── Description structure extraction ───────────────────────────────────────────
 
 /**
@@ -39,45 +96,8 @@ export function extractDescriptionRules(tickets: TicketData[]): TeamRule[] {
   const groups = groupBy(tickets, (t) => t.issueType);
 
   for (const [type, group] of groups) {
-    const headingFreq = new Map<string, number>();
-    let structuredCount = 0;
-    let checkboxCount = 0;
-    let gherkinCount = 0;
-    let bulletCount = 0;
-    let totalLength = 0;
-    const headingOrders: string[][] = [];
-
-    for (const t of group) {
-      const desc = t.description ?? "";
-      totalLength += desc.length;
-
-      // Collect headings
-      const ticketHeadings: string[] = [];
-      let m: RegExpExecArray | null;
-
-      HEADING_RE.lastIndex = 0;
-      for (m = HEADING_RE.exec(desc); m !== null; m = HEADING_RE.exec(desc)) {
-        const h = m[1]?.trim().toLowerCase() ?? "";
-        ticketHeadings.push(h);
-        headingFreq.set(h, (headingFreq.get(h) ?? 0) + 1);
-      }
-
-      BOLD_SECTION_RE.lastIndex = 0;
-      for (m = BOLD_SECTION_RE.exec(desc); m !== null; m = BOLD_SECTION_RE.exec(desc)) {
-        const h = m[1]?.trim().toLowerCase() ?? "";
-        ticketHeadings.push(h);
-        headingFreq.set(h, (headingFreq.get(h) ?? 0) + 1);
-      }
-
-      if (ticketHeadings.length > 0) {
-        structuredCount++;
-        headingOrders.push(ticketHeadings);
-      }
-
-      if (CHECKBOX_RE.test(desc)) checkboxCount++;
-      if (GHERKIN_RE.test(desc)) gherkinCount++;
-      if (BULLET_RE.test(desc)) bulletCount++;
-    }
+    const { headingFreq, structuredCount, checkboxCount, gherkinCount, bulletCount, totalLength } =
+      analyzeDescriptions(group);
 
     const n = group.length;
     const threshold = n * 0.3;
@@ -100,52 +120,55 @@ export function extractDescriptionRules(tickets: TicketData[]): TeamRule[] {
       sample_size: n,
     });
 
-    // AC format
-    let acFormat: string;
-    const maxAc = Math.max(checkboxCount, gherkinCount, bulletCount);
-    if (maxAc === 0) {
-      acFormat = "none";
-    } else if (checkboxCount === maxAc && gherkinCount === maxAc) {
-      acFormat = "mixed";
-    } else if (checkboxCount === maxAc) {
-      acFormat = "checkbox";
-    } else if (gherkinCount === maxAc) {
-      acFormat = "gherkin";
-    } else {
-      acFormat = "bullet";
-    }
+    const acFormat = detectAcFormat(checkboxCount, gherkinCount, bulletCount);
 
-    rules.push({
-      category: "description_structure",
-      rule_key: `ac_format/${type}`,
-      issue_type: type,
-      rule_value: acFormat,
-      confidence: n > 0 ? maxAc / n : 0,
-      sample_size: n,
-    });
-
-    // Avg length
-    rules.push({
-      category: "description_structure",
-      rule_key: `avg_length/${type}`,
-      issue_type: type,
-      rule_value: String(n > 0 ? Math.round(totalLength / n) : 0),
-      confidence: Math.min(1, n / 20),
-      sample_size: n,
-    });
-
-    // Structured percentage
-    rules.push({
-      category: "description_structure",
-      rule_key: `has_structure_pct/${type}`,
-      issue_type: type,
-      rule_value: `${pct(structuredCount, n)}%`,
-      confidence: Math.min(1, n / 20),
-      sample_size: n,
-    });
+    rules.push(
+      {
+        category: "description_structure",
+        rule_key: `ac_format/${type}`,
+        issue_type: type,
+        rule_value: acFormat,
+        confidence: n > 0 ? Math.max(checkboxCount, gherkinCount, bulletCount) / n : 0,
+        sample_size: n,
+      },
+      {
+        category: "description_structure",
+        rule_key: `avg_length/${type}`,
+        issue_type: type,
+        rule_value: String(n > 0 ? Math.round(totalLength / n) : 0),
+        confidence: Math.min(1, n / 20),
+        sample_size: n,
+      },
+      {
+        category: "description_structure",
+        rule_key: `has_structure_pct/${type}`,
+        issue_type: type,
+        rule_value: `${pct(structuredCount, n)}%`,
+        confidence: Math.min(1, n / 20),
+        sample_size: n,
+      },
+    );
   }
 
   return rules;
+}
+
+// ─── Naming convention helpers ───────────────────────────────────────────────────
+
+/** Determine the naming pattern for a group based on verb/tag counts. */
+function detectNamingPattern(
+  verbFirstCount: number,
+  tagPrefixCount: number,
+  n: number,
+): { pattern: string; confidence: number } {
+  const safeN = Math.max(n, 1);
+  if (verbFirstCount / safeN > 0.6) {
+    return { pattern: "verb-first", confidence: verbFirstCount / safeN };
+  }
+  if (tagPrefixCount / safeN > 0.3) {
+    return { pattern: "tag-prefix", confidence: tagPrefixCount / safeN };
+  }
+  return { pattern: "noun-phrase", confidence: 0.5 };
 }
 
 // ─── Naming convention extraction ───────────────────────────────────────────────
@@ -170,7 +193,7 @@ export function extractNamingRules(tickets: TicketData[]): TeamRule[] {
       const words = t.summary.trim().split(/\s+/);
       wordCounts.push(words.length);
 
-      const firstWord = words[0]?.toLowerCase().replace(/[^a-z]/g, "") ?? "";
+      const firstWord = words[0]?.toLowerCase().replaceAll(/[^a-z]/g, "") ?? "";
       if (ACTION_VERBS.has(firstWord)) {
         verbFirstCount++;
         verbFreq.set(firstWord, (verbFreq.get(firstWord) ?? 0) + 1);
@@ -196,7 +219,6 @@ export function extractNamingRules(tickets: TicketData[]): TeamRule[] {
       sample_size: n,
     });
 
-    // Avg word count
     rules.push({
       category: "naming_convention",
       rule_key: `avg_words/${type}`,
@@ -206,27 +228,14 @@ export function extractNamingRules(tickets: TicketData[]): TeamRule[] {
       sample_size: n,
     });
 
-    // Pattern
-    let pattern: string;
-    if (verbFirstCount / Math.max(n, 1) > 0.6) {
-      pattern = "verb-first";
-    } else if (tagPrefixCount / Math.max(n, 1) > 0.3) {
-      pattern = "tag-prefix";
-    } else {
-      pattern = "noun-phrase";
-    }
+    const { pattern, confidence } = detectNamingPattern(verbFirstCount, tagPrefixCount, n);
 
     rules.push({
       category: "naming_convention",
       rule_key: `pattern/${type}`,
       issue_type: type,
       rule_value: pattern,
-      confidence:
-        pattern === "verb-first"
-          ? verbFirstCount / Math.max(n, 1)
-          : pattern === "tag-prefix"
-            ? tagPrefixCount / Math.max(n, 1)
-            : 0.5,
+      confidence,
       sample_size: n,
     });
 
@@ -271,24 +280,6 @@ export function extractPointRules(tickets: TicketData[]): TeamRule[] {
 
     const confidence = Math.min(1, n / 30) * Math.max(0, 1 - normalizedStd);
 
-    rules.push({
-      category: "story_points",
-      rule_key: `median/${type}`,
-      issue_type: type,
-      rule_value: String(median(pts)),
-      confidence,
-      sample_size: n,
-    });
-
-    rules.push({
-      category: "story_points",
-      rule_key: `range/${type}`,
-      issue_type: type,
-      rule_value: `${p25}-${p75}`,
-      confidence,
-      sample_size: n,
-    });
-
     // Distribution
     const dist = new Map<number, number>();
     for (const p of pts) dist.set(p, (dist.get(p) ?? 0) + 1);
@@ -297,23 +288,40 @@ export function extractPointRules(tickets: TicketData[]): TeamRule[] {
       distObj[String(v)] = `${pct(c, n)}%`;
     }
 
-    rules.push({
-      category: "story_points",
-      rule_key: `distribution/${type}`,
-      issue_type: type,
-      rule_value: JSON.stringify(distObj),
-      confidence,
-      sample_size: n,
-    });
-
-    rules.push({
-      category: "story_points",
-      rule_key: `mean/${type}`,
-      issue_type: type,
-      rule_value: m.toFixed(1),
-      confidence,
-      sample_size: n,
-    });
+    rules.push(
+      {
+        category: "story_points",
+        rule_key: `median/${type}`,
+        issue_type: type,
+        rule_value: String(median(pts)),
+        confidence,
+        sample_size: n,
+      },
+      {
+        category: "story_points",
+        rule_key: `range/${type}`,
+        issue_type: type,
+        rule_value: `${p25}-${p75}`,
+        confidence,
+        sample_size: n,
+      },
+      {
+        category: "story_points",
+        rule_key: `distribution/${type}`,
+        issue_type: type,
+        rule_value: JSON.stringify(distObj),
+        confidence,
+        sample_size: n,
+      },
+      {
+        category: "story_points",
+        rule_key: `mean/${type}`,
+        issue_type: type,
+        rule_value: m.toFixed(1),
+        confidence,
+        sample_size: n,
+      },
+    );
   }
 
   return rules;
