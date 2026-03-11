@@ -347,4 +347,3 @@ export function prepareStatements(db: SqliteDatabase): PreparedStatements {
     getLatestAnalysis: db.prepare("SELECT * FROM backlog_analysis ORDER BY analyzed_at DESC LIMIT 1"),
   };
 }
-
