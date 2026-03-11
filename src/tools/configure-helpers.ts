@@ -62,21 +62,28 @@ async function fetchTickets(
 
     for (const issue of batch.issues) {
       const f = issue.fields as Record<string, unknown>;
+      const str = (v: unknown, fallback = ""): string => (typeof v === "string" ? v : fallback);
       const nested = (key: string) => f[key] as Record<string, unknown> | undefined;
+      const nestedName = (key: string, fallback: string): string => {
+        const name = nested(key)?.name;
+        return typeof name === "string" ? name : fallback;
+      };
       allTickets.push({
         key: issue.key,
-        summary: String(f.summary || ""),
+        summary: str(f.summary),
         description: adfToText(f.description),
-        issueType: String(nested("issuetype")?.name || "Unknown"),
-        priority: String(nested("priority")?.name || "Medium"),
+        issueType: nestedName("issuetype", "Unknown"),
+        priority: nestedName("priority", "Medium"),
         storyPoints: (f.story_points ?? f.storyPoints ?? f.customfield_10016 ?? null) as number | null,
         labels: (f.labels || []) as string[],
-        components: ((f.components || []) as Array<{ name?: string }>).map((c) => c.name || String(c)),
-        status: String(nested("status")?.name || "Unknown"),
+        components: ((f.components || []) as Array<{ name?: string }>).map((c) =>
+          typeof c.name === "string" ? c.name : String(c),
+        ),
+        status: nestedName("status", "Unknown"),
         assignee: nested("assignee")?.displayName ? String(nested("assignee")?.displayName) : null,
-        created: String(f.created || ""),
-        updated: String(f.updated || ""),
-        resolutionDate: f.resolutiondate ? String(f.resolutiondate) : null,
+        created: str(f.created),
+        updated: str(f.updated),
+        resolutionDate: typeof f.resolutiondate === "string" ? f.resolutiondate : null,
         changelog: [],
       });
     }

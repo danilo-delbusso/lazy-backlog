@@ -49,33 +49,30 @@ async function handleList(params: { maxResults?: number }, kb: KnowledgeBase): P
   }
 }
 
+function buildBacklogJql(rawJql: string, projectKey?: string): string {
+  const orderExec = /\s+(ORDER\s+BY\s+[^\n]+)$/i.exec(rawJql);
+  const orderClause = orderExec ? ` ${orderExec[1]}` : " ORDER BY rank ASC";
+  const filterPart = orderExec ? rawJql.slice(0, orderExec.index) : rawJql;
+
+  const backlogFilter = /\bsprint\s/i.test(filterPart) ? filterPart : `sprint is EMPTY AND (${filterPart})`;
+
+  const projectScoped =
+    projectKey && !/\bproject\s*[=!]/i.test(backlogFilter)
+      ? `project = ${projectKey} AND (${backlogFilter})`
+      : backlogFilter;
+
+  return `${projectScoped}${orderClause}`;
+}
+
 async function handleSearch(params: { jql?: string; maxResults?: number }, kb: KnowledgeBase): Promise<ToolResponse> {
   if (!params.jql) return errorResponse("jql is required for 'search' action.");
   try {
     const { jira, config } = buildJiraClient(kb);
-    const boardId = config.jiraBoardId;
     const maxResults = params.maxResults ?? 50;
 
-    let result: { issues: SearchIssue[]; total: number };
-
-    if (boardId) {
-      result = await jira.searchBacklogIssues(boardId, params.jql, maxResults);
-    } else {
-      let jql = params.jql;
-      const orderExec = /\s+(ORDER\s+BY\s+[^\n]+)$/i.exec(jql);
-      const orderClause = orderExec ? ` ${orderExec[1]}` : " ORDER BY rank ASC";
-      const filterPart = orderExec ? jql.slice(0, orderExec.index) : jql;
-
-      const backlogFilter = /\bsprint\s/i.test(filterPart) ? filterPart : `sprint is EMPTY AND (${filterPart})`;
-
-      const projectScoped =
-        config.jiraProjectKey && !/\bproject\s*[=!]/i.test(backlogFilter)
-          ? `project = ${config.jiraProjectKey} AND (${backlogFilter})`
-          : backlogFilter;
-
-      jql = `${projectScoped}${orderClause}`;
-      result = await jira.searchIssues(jql, undefined, maxResults);
-    }
+    const result = config.jiraBoardId
+      ? await jira.searchBacklogIssues(config.jiraBoardId, params.jql, maxResults)
+      : await jira.searchIssues(buildBacklogJql(params.jql, config.jiraProjectKey), undefined, maxResults);
 
     if (result.issues.length === 0) {
       return textResponse(`No backlog items found for: \`${params.jql}\``);
@@ -124,6 +121,11 @@ async function resolvePosition(
   return { rankAfter: lastKey };
 }
 
+function describeRankDirection(params: { position?: string; rankBefore?: string; rankAfter?: string }): string {
+  if (params.position) return `to ${params.position} of backlog`;
+  return params.rankBefore ? `before ${params.rankBefore}` : `after ${params.rankAfter}`;
+}
+
 async function handleRank(
   params: {
     issueKey?: string;
@@ -148,12 +150,8 @@ async function handleRank(
       if (!boardId) {
         return errorResponse("Board ID is required for position ranking. Run configure action=discover-jira first.");
       }
-
       const resolved = await resolvePosition({ issueKey: params.issueKey, position: params.position }, jira, boardId);
-
-      // If it's a ToolResponse (has 'content'), return early
       if ("content" in resolved) return resolved;
-
       rankBefore = resolved.rankBefore;
       rankAfter = resolved.rankAfter;
     }
@@ -163,13 +161,9 @@ async function handleRank(
       ...(rankAfter ? { rankAfter } : {}),
     });
 
-    let direction: string;
-    if (params.position) {
-      direction = `to ${params.position} of backlog`;
-    } else {
-      direction = rankBefore ? `before ${rankBefore}` : `after ${rankAfter}`;
-    }
-    return textResponse(`Ranked **${params.issueKey}** ${direction}.`);
+    return textResponse(
+      `Ranked **${params.issueKey}** ${describeRankDirection({ ...params, rankBefore, rankAfter })}.`,
+    );
   } catch (err: unknown) {
     return errorResponse(`Failed to rank ${params.issueKey}: ${err instanceof Error ? err.message : String(err)}`);
   }

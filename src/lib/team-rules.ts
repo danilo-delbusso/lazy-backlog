@@ -53,32 +53,35 @@ function formatDescriptionSection(descRules: TeamRule[]): string[] {
   return lines;
 }
 
-function formatNamingSection(namingRules: TeamRule[]): string[] {
-  const lines: string[] = ["### Naming Conventions", ""];
+function formatNamingRule(r: TeamRule, lines: string[]): void {
+  const typeLabel = r.issue_type ?? "All";
+  const suffix = ruleSuffix(r);
 
-  for (const r of namingRules) {
-    const typeLabel = r.issue_type ?? "All";
-    const suffix = ruleSuffix(r);
-
-    if (r.rule_key.startsWith("pattern/")) {
-      lines.push(`- **${typeLabel}**: \`${r.rule_value}\` pattern${suffix}`);
-    } else if (r.rule_key.startsWith("avg_words/")) {
-      lines.push(`- **${typeLabel}**: avg ${r.rule_value} words${suffix}`);
-    } else if (r.rule_key.startsWith("first_verb/")) {
-      const verbs: { verb: string; percentage: string }[] = JSON.parse(r.rule_value);
-      if (verbs.length > 0) {
-        const verbStr = verbs.map((v) => `${v.verb} (${v.percentage})`).join(", ");
-        lines.push(`- **${typeLabel}** top verbs: ${verbStr}${suffix}`);
-      }
-    } else if (r.rule_key.startsWith("examples/")) {
-      const examples: string[] = JSON.parse(r.rule_value);
-      if (examples.length > 0) {
-        lines.push(`- **${typeLabel}** examples:`);
-        for (const ex of examples) {
-          lines.push(`  - "${ex}"`);
-        }
+  if (r.rule_key.startsWith("pattern/")) {
+    lines.push(`- **${typeLabel}**: \`${r.rule_value}\` pattern${suffix}`);
+  } else if (r.rule_key.startsWith("avg_words/")) {
+    lines.push(`- **${typeLabel}**: avg ${r.rule_value} words${suffix}`);
+  } else if (r.rule_key.startsWith("first_verb/")) {
+    const verbs: { verb: string; percentage: string }[] = JSON.parse(r.rule_value);
+    if (verbs.length > 0) {
+      const verbStr = verbs.map((v) => `${v.verb} (${v.percentage})`).join(", ");
+      lines.push(`- **${typeLabel}** top verbs: ${verbStr}${suffix}`);
+    }
+  } else if (r.rule_key.startsWith("examples/")) {
+    const examples: string[] = JSON.parse(r.rule_value);
+    if (examples.length > 0) {
+      lines.push(`- **${typeLabel}** examples:`);
+      for (const ex of examples) {
+        lines.push(`  - "${ex}"`);
       }
     }
+  }
+}
+
+function formatNamingSection(namingRules: TeamRule[]): string[] {
+  const lines: string[] = ["### Naming Conventions", ""];
+  for (const r of namingRules) {
+    formatNamingRule(r, lines);
   }
   lines.push("");
   return lines;

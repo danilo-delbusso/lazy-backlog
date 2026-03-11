@@ -170,7 +170,7 @@ function parseList(lines: string[], i: number, baseIndent: number): { node: AdfN
 /** Convert markdown-ish text to an ADF document node. */
 export function markdownToAdf(md: string): AdfNode {
   // Normalise literal \n sequences (common from AI clients double-escaping newlines)
-  const normalised = md.replaceAll("\\n", "\n");
+  const normalised = md.replaceAll(String.raw`\n`, "\n");
   const lines = normalised.split("\n");
   const content: AdfNode[] = [];
   let i = 0;

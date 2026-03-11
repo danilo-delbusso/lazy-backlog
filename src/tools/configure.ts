@@ -102,8 +102,8 @@ function handleSet(
   kb.setConfig("atlassian", JSON.stringify(current));
 
   const parts: string[] = [];
-  if (current.jiraProjectKey) parts.push(`Project: ${String(current.jiraProjectKey)}`);
-  if (current.jiraBoardId) parts.push(`Board: ${String(current.jiraBoardId)}`);
+  if (typeof current.jiraProjectKey === "string") parts.push(`Project: ${current.jiraProjectKey}`);
+  if (typeof current.jiraBoardId === "string") parts.push(`Board: ${current.jiraBoardId}`);
   const spaces = (current.confluenceSpaces as string[])?.join(", ");
   if (spaces) parts.push(`Spaces: ${spaces}`);
 
@@ -158,6 +158,36 @@ function handleGet(kb: KnowledgeBase): ToolResponse {
   return textResponse(lines.join("\n"));
 }
 
+function validateSetupParams(
+  projectKey: string | undefined,
+  boardId: string | undefined,
+  spaces: string[],
+): ToolResponse | null {
+  const missing: string[] = [];
+  if (!projectKey) {
+    missing.push("1. **projectKey** (REQUIRED): Jira project key — the prefix on ticket IDs, e.g. 'BP', 'ENG'");
+  }
+  if (!boardId) {
+    missing.push(
+      "2. **boardId** (recommended): Jira board ID — found in the board URL /board/123. Needed for sprint management",
+    );
+  }
+  if (spaces.length === 0) {
+    missing.push(
+      "3. **spaceKeys** (recommended): Confluence space keys to spider for project context, e.g. ['ENG','PM']. " +
+        "Spidering Confluence is what makes ticket planning context-aware. Say 'none' only if you don't use Confluence",
+    );
+  }
+  if (missing.length > 0 && !projectKey) {
+    return errorResponse(
+      "Setup needs more info. Ask the user for:\n" +
+        missing.join("\n") +
+        "\n\nThen call: configure action='setup' projectKey='...' boardId='...' spaceKeys=['...']",
+    );
+  }
+  return null;
+}
+
 async function handleSetup(
   params: {
     projectKey?: string;
@@ -181,29 +211,8 @@ async function handleSetup(
   const boardId = params.boardId || config.jiraBoardId;
   const spaces = params.spaceKeys || config.confluenceSpaces || [];
 
-  // Validate required params
-  const missing: string[] = [];
-  if (!projectKey) {
-    missing.push("1. **projectKey** (REQUIRED): Jira project key — the prefix on ticket IDs, e.g. 'BP', 'ENG'");
-  }
-  if (!boardId) {
-    missing.push(
-      "2. **boardId** (recommended): Jira board ID — found in the board URL /board/123. Needed for sprint management",
-    );
-  }
-  if (spaces.length === 0) {
-    missing.push(
-      "3. **spaceKeys** (recommended): Confluence space keys to spider for project context, e.g. ['ENG','PM']. " +
-        "Spidering Confluence is what makes ticket planning context-aware. Say 'none' only if you don't use Confluence",
-    );
-  }
-  if (missing.length > 0 && !projectKey) {
-    return errorResponse(
-      "Setup needs more info. Ask the user for:\n" +
-        missing.join("\n") +
-        "\n\nThen call: configure action='setup' projectKey='...' boardId='...' spaceKeys=['...']",
-    );
-  }
+  const validationError = validateSetupParams(projectKey, boardId, spaces);
+  if (validationError) return validationError;
 
   const resolvedProjectKey = projectKey as string;
 
