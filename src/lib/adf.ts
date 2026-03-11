@@ -31,9 +31,9 @@ function paragraph(text: string): AdfNode {
 
 // Inline markdown patterns — split to keep regex complexity under SonarQube threshold
 const MD_LINK_RE = /\[([^\]]+)]\(([^)]+)\)/;
-const BOLD_RE = /\*\*(.+?)\*\*/;
-const ITALIC_RE = /\*(.+?)\*/;
-const CODE_RE = /`(.+?)`/;
+const BOLD_RE = /\*\*((?:[^*]|\*(?!\*))+)\*\*/;
+const ITALIC_RE = /\*([^*]+)\*/;
+const CODE_RE = /`([^`]+)`/;
 const BARE_URL_RE = /(?<![([])(https?:\/\/[^\s)>\]]+)/;
 
 const INLINE_RE = new RegExp(

@@ -62,7 +62,7 @@ async function handleSearch(params: { jql?: string; maxResults?: number }, kb: K
       result = await jira.searchBacklogIssues(boardId, params.jql, maxResults);
     } else {
       let jql = params.jql;
-      const orderExec = /\s+(ORDER\s+BY\s+.+)$/i.exec(jql);
+      const orderExec = /\s+(ORDER\s+BY\s+[^\n]+)$/i.exec(jql);
       const orderClause = orderExec ? ` ${orderExec[1]}` : " ORDER BY rank ASC";
       const filterPart = orderExec ? jql.slice(0, orderExec.index) : jql;
 

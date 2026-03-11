@@ -60,7 +60,7 @@ export async function handleSearchBugs(
   try {
     const { jira, config } = buildJiraClient(kb);
     let jql = params.jql;
-    const orderExec = /\s+(ORDER\s+BY\s+.+)$/i.exec(jql);
+    const orderExec = /\s+(ORDER\s+BY\s+[^\n]+)$/i.exec(jql);
     const orderClause = orderExec ? ` ${orderExec[1]}` : "";
     const filterPart = orderExec ? jql.slice(0, orderExec.index) : jql;
 

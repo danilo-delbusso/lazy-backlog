@@ -118,7 +118,9 @@ function handleGet(kb: KnowledgeBase): ToolResponse {
     return errorResponse(String(err));
   }
 
-  const maskedUrl = config.siteUrl.replace(/\/\/(.+?)\./, "//***.").replace(/\.atlassian\.net.*/, ".atlassian.net");
+  const maskedUrl = config.siteUrl
+    .replace(/\/\/([^.]+)\./, "//***.")
+    .replace(/\.atlassian\.net[^\s]*/, ".atlassian.net");
   const lines: string[] = ["# Current Configuration\n"];
 
   const envOrDb = (envKey: string, value: string | undefined): string => {
