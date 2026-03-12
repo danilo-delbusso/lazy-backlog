@@ -71,22 +71,18 @@ function buildSkeleton(headings: Array<{ text: string; frequency: number }>, acF
 
   for (const h of headings) {
     // Title-case the heading
-    const title = h.text.replace(/\b\w/g, (c) => c.toUpperCase());
+    const title = h.text.replaceAll(/\b\w/g, (c) => c.toUpperCase());
     lines.push(`## ${title}`);
 
     // Add placeholder content based on heading type
     const lower = h.text.toLowerCase();
     if (lower.includes("acceptance criteria") || lower.includes("ac")) {
       if (acFormat === "checkbox") {
-        lines.push("- [ ] [Criterion 1]");
-        lines.push("- [ ] [Criterion 2]");
+        lines.push("- [ ] [Criterion 1]", "- [ ] [Criterion 2]");
       } else if (acFormat === "given-when-then") {
-        lines.push("Given [precondition]");
-        lines.push("When [action]");
-        lines.push("Then [expected result]");
+        lines.push("Given [precondition]", "When [action]", "Then [expected result]");
       } else if (acFormat === "numbered") {
-        lines.push("1. [Criterion 1]");
-        lines.push("2. [Criterion 2]");
+        lines.push("1. [Criterion 1]", "2. [Criterion 2]");
       } else {
         lines.push("[Describe acceptance criteria]");
       }
@@ -98,6 +94,63 @@ function buildSkeleton(headings: Array<{ text: string; frequency: number }>, acF
   }
 
   return lines.join("\n").trimEnd();
+}
+
+// ─── Aggregation helpers ─────────────────────────────────────────────────────────
+
+/** Count heading frequency across all descriptions in a group. */
+function aggregateHeadingCounts(group: TicketData[]): Map<string, number> {
+  const headingCounts = new Map<string, number>();
+  for (const t of group) {
+    if (!t.description) continue;
+    const seen = new Set<string>();
+    for (const h of extractHeadings(t.description)) {
+      if (!seen.has(h)) {
+        seen.add(h);
+        headingCounts.set(h, (headingCounts.get(h) ?? 0) + 1);
+      }
+    }
+  }
+  return headingCounts;
+}
+
+/** Filter and sort headings appearing in >30% of tickets. */
+function filterCommonHeadings(
+  headingCounts: Map<string, number>,
+  groupSize: number,
+): Array<{ text: string; frequency: number }> {
+  const threshold = groupSize * 0.3;
+  return [...headingCounts.entries()]
+    .filter(([, count]) => count > threshold)
+    .sort((a, b) => b[1] - a[1])
+    .map(([text, count]) => ({
+      text,
+      frequency: Math.round((count / groupSize) * 100) / 100,
+    }));
+}
+
+/** Detect the dominant AC format and average item count for a group. */
+function detectGroupAcFormat(group: TicketData[]): { acFormat: AcFormat; avgAcItems: number } {
+  const formatCounts: Record<AcFormat, number> = {
+    checkbox: 0,
+    "given-when-then": 0,
+    numbered: 0,
+    prose: 0,
+    none: 0,
+  };
+  const acItemCounts: number[] = [];
+
+  for (const t of group) {
+    const format = detectAcFormat(t.description ?? "");
+    formatCounts[format]++;
+    const items = countAcItems(t.description ?? "", format);
+    if (items > 0) acItemCounts.push(items);
+  }
+
+  const acFormat = (Object.entries(formatCounts) as [AcFormat, number][]).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "none";
+  const avgAcItems = acItemCounts.length > 0 ? Math.round(mean(acItemCounts) * 10) / 10 : 0;
+
+  return { acFormat, avgAcItems };
 }
 
 // ─── Main extractor ──────────────────────────────────────────────────────────────
@@ -116,55 +169,9 @@ export function extractTemplateInsights(tickets: TicketData[]): TemplateInsight[
   for (const [issueType, group] of byType) {
     if (group.length < 5) continue;
 
-    // Count heading frequency across all descriptions
-    const headingCounts = new Map<string, number>();
-
-    for (const t of group) {
-      if (!t.description) continue;
-      // Deduplicate headings within a single ticket
-      const seen = new Set<string>();
-      for (const h of extractHeadings(t.description)) {
-        if (!seen.has(h)) {
-          seen.add(h);
-          headingCounts.set(h, (headingCounts.get(h) ?? 0) + 1);
-        }
-      }
-    }
-
-    // Keep headings appearing in >30% of tickets
-    const threshold = group.length * 0.3;
-    const headings = [...headingCounts.entries()]
-      .filter(([, count]) => count > threshold)
-      .sort((a, b) => b[1] - a[1])
-      .map(([text, count]) => ({
-        text,
-        frequency: Math.round((count / group.length) * 100) / 100,
-      }));
-
-    // Detect AC format by majority vote
-    const formatCounts: Record<AcFormat, number> = {
-      checkbox: 0,
-      "given-when-then": 0,
-      numbered: 0,
-      prose: 0,
-      none: 0,
-    };
-
-    const acItemCounts: number[] = [];
-
-    for (const t of group) {
-      const format = detectAcFormat(t.description ?? "");
-      formatCounts[format]++;
-      const items = countAcItems(t.description ?? "", format);
-      if (items > 0) acItemCounts.push(items);
-    }
-
-    // Pick format with highest count
-    const acFormat =
-      (Object.entries(formatCounts) as [AcFormat, number][]).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "none";
-
-    const avgAcItems = acItemCounts.length > 0 ? Math.round(mean(acItemCounts) * 10) / 10 : 0;
-
+    const headingCounts = aggregateHeadingCounts(group);
+    const headings = filterCommonHeadings(headingCounts, group.length);
+    const { acFormat, avgAcItems } = detectGroupAcFormat(group);
     const templateSkeleton = buildSkeleton(headings, acFormat);
 
     insights.push({

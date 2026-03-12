@@ -189,8 +189,11 @@ export function formatConventionsSection(conventions: AppliedConvention[]): stri
   const applied = conventions.filter((c) => c.status === "applied").length;
   const suggestions = conventions.length - applied;
 
-  const statusIcon = (s: AppliedConvention["status"]): string =>
-    s === "applied" ? "\u2705" : s === "warning" ? "\u26a0\ufe0f" : "\u2139\ufe0f";
+  const statusIcon = (s: AppliedConvention["status"]): string => {
+    if (s === "applied") return "\u2705";
+    if (s === "warning") return "\u26a0\ufe0f";
+    return "\u2139\ufe0f";
+  };
 
   const lines: string[] = [
     `## Team Conventions (${applied} applied, ${suggestions} suggestions)`,

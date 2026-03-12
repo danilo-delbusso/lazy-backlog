@@ -23,6 +23,51 @@ function formatIssueRow(issue: SearchIssue, spField: string | undefined): string
   return `| ${issue.key} | ${issue.fields.summary} | ${issue.fields.issuetype?.name ?? "-"} | ${issue.fields.priority?.name ?? "-"} | ${sp ?? "-"} | ${issue.fields.assignee?.displayName || "Unassigned"} |`;
 }
 
+function formatIssueTable(issues: SearchIssue[], spField: string | undefined): string {
+  let out = "| Key | Summary | Type | Priority | SP | Assignee |\n";
+  out += "|-----|---------|------|----------|----|----------|\n";
+  for (const issue of issues) {
+    out += `${formatIssueRow(issue, spField)}\n`;
+  }
+  return out;
+}
+
+function detectDuplicates(issues: SearchIssue[]): string {
+  const tokenized = issues.map((issue) => ({
+    key: issue.key,
+    summary: issue.fields.summary,
+    tokens: tokenize(issue.fields.summary),
+  }));
+  const pairs: Array<{ a: string; b: string; summaryA: string; summaryB: string; similarity: number }> = [];
+  for (let i = 0; i < tokenized.length; i++) {
+    for (let j = i + 1; j < tokenized.length; j++) {
+      const itemA = tokenized[i];
+      const itemB = tokenized[j];
+      if (!itemA || !itemB) continue;
+      const sim = jaccardSimilarity(itemA.tokens, itemB.tokens);
+      if (sim > 0.4) {
+        pairs.push({
+          a: itemA.key,
+          b: itemB.key,
+          summaryA: itemA.summary,
+          summaryB: itemB.summary,
+          similarity: sim,
+        });
+      }
+    }
+  }
+  if (pairs.length === 0) return "";
+
+  pairs.sort((a, b) => b.similarity - a.similarity);
+  let out = `\n## Potential Duplicates (${pairs.length} pairs)\n\n`;
+  out += "| Issue A | Issue B | Overlap |\n";
+  out += "|---------|---------|--------|\n";
+  for (const p of pairs) {
+    out += `| ${p.a}: ${p.summaryA.slice(0, 40)} | ${p.b}: ${p.summaryB.slice(0, 40)} | **${Math.round(p.similarity * 100)}%** |\n`;
+  }
+  return out;
+}
+
 // ── Action Handlers ──────────────────────────────────────────────────────────
 
 async function handleList(
@@ -41,47 +86,10 @@ async function handleList(
     }
 
     let out = `# Board Backlog (${result.issues.length}/${result.total})\n\n`;
-    out += "| Key | Summary | Type | Priority | SP | Assignee |\n";
-    out += "|-----|---------|------|----------|----|----------|\n";
-    const spField = jira.storyPointsFieldId;
-    for (const issue of result.issues) {
-      out += `${formatIssueRow(issue, spField)}\n`;
-    }
+    out += formatIssueTable(result.issues, jira.storyPointsFieldId);
 
-    // Pairwise duplicate detection
     if (params.detectDuplicates && result.issues.length > 1) {
-      const tokenized = result.issues.map((issue) => ({
-        key: issue.key,
-        summary: issue.fields.summary,
-        tokens: tokenize(issue.fields.summary),
-      }));
-      const pairs: Array<{ a: string; b: string; summaryA: string; summaryB: string; similarity: number }> = [];
-      for (let i = 0; i < tokenized.length; i++) {
-        for (let j = i + 1; j < tokenized.length; j++) {
-          const itemA = tokenized[i];
-          const itemB = tokenized[j];
-          if (!itemA || !itemB) continue;
-          const sim = jaccardSimilarity(itemA.tokens, itemB.tokens);
-          if (sim > 0.4) {
-            pairs.push({
-              a: itemA.key,
-              b: itemB.key,
-              summaryA: itemA.summary,
-              summaryB: itemB.summary,
-              similarity: sim,
-            });
-          }
-        }
-      }
-      if (pairs.length > 0) {
-        pairs.sort((a, b) => b.similarity - a.similarity);
-        out += `\n## Potential Duplicates (${pairs.length} pairs)\n\n`;
-        out += "| Issue A | Issue B | Overlap |\n";
-        out += "|---------|---------|--------|\n";
-        for (const p of pairs) {
-          out += `| ${p.a}: ${p.summaryA.slice(0, 40)} | ${p.b}: ${p.summaryB.slice(0, 40)} | **${Math.round(p.similarity * 100)}%** |\n`;
-        }
-      }
+      out += detectDuplicates(result.issues);
     }
 
     return textResponse(out);
@@ -125,13 +133,8 @@ async function handleSearch(params: { jql?: string; maxResults?: number }, kb: K
       return textResponse(`No backlog items found for: \`${params.jql}\``);
     }
 
-    const spField = jira.storyPointsFieldId;
     let out = `# Backlog Search (${result.issues.length}/${result.total})\n\n`;
-    out += "| Key | Summary | Type | Priority | SP | Assignee |\n";
-    out += "|-----|---------|------|----------|----|----------|\n";
-    for (const issue of result.issues) {
-      out += `${formatIssueRow(issue, spField)}\n`;
-    }
+    out += formatIssueTable(result.issues, jira.storyPointsFieldId);
     return textResponse(out);
   } catch (err: unknown) {
     return errorResponse(`Backlog search failed: ${err instanceof Error ? err.message : String(err)}`);

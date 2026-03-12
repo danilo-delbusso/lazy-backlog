@@ -47,7 +47,7 @@ function handleTeamProfile(kb: KnowledgeBase): ToolResponse {
       byCategory.set(rule.category, existing);
     }
     for (const [category, rules] of byCategory) {
-      const label = category.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+      const label = category.replaceAll("_", " ").replace(/\b\w/g, (c) => c.toUpperCase());
       lines.push(`### ${label}`);
       for (const r of rules) {
         const conf = Math.round(r.confidence * 100);

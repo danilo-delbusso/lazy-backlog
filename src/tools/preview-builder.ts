@@ -51,14 +51,33 @@ function buildDuplicatesSection(duplicates: DuplicateCandidate[]): string {
     lines.push(`| ${d.issueKey} | ${d.summary} | ${d.status} | **${pct}%** |`);
   }
 
-  lines.push("");
-  lines.push("> \u26a0\ufe0f Review these before confirming. Use `issues action=get issueKey=<KEY>` to inspect.");
+  lines.push("", "> \u26a0\ufe0f Review these before confirming. Use `issues action=get issueKey=<KEY>` to inspect.");
 
   return lines.join("\n");
 }
 
 function separator(): string {
   return "\n\n---\n\n";
+}
+
+function appendSharedSections(sections: string[], tickets: PreviewData[]): void {
+  const firstWithConventions = tickets.find((t) => t.conventions.length > 0);
+  if (firstWithConventions) {
+    const conventionsText = formatConventionsSection(firstWithConventions.conventions);
+    if (conventionsText) sections.push(conventionsText);
+  }
+
+  const firstWithInsights = tickets.find((t) => t.insights);
+  if (firstWithInsights?.insights) sections.push(firstWithInsights.insights);
+
+  const firstWithKb = tickets.find((t) => t.kbContext);
+  if (firstWithKb?.kbContext) sections.push(`## Knowledge Base Context\n\n${firstWithKb.kbContext}`);
+
+  const firstWithSchema = tickets.find((t) => t.schemaGuidance);
+  if (firstWithSchema?.schemaGuidance) sections.push(firstWithSchema.schemaGuidance);
+
+  const firstWithRules = tickets.find((t) => t.fieldRules);
+  if (firstWithRules?.fieldRules) sections.push(firstWithRules.fieldRules);
 }
 
 // ─── Public API ─────────────────────────────────────────────────────────────────
@@ -127,23 +146,21 @@ export function buildBulkPreviewCard(tickets: PreviewData[]): string {
 
     // Compact fields table
     if (data.fields.length > 0) {
-      ticketLines.push("");
-      ticketLines.push(buildFieldsTable(data.fields));
+      ticketLines.push("", buildFieldsTable(data.fields));
     }
 
     // Description (truncated for bulk)
     if (data.description) {
       const truncated = data.description.length > 300 ? `${data.description.slice(0, 300)}...` : data.description;
-      ticketLines.push("");
-      ticketLines.push(`**Description:** ${truncated}`);
+      ticketLines.push("", `**Description:** ${truncated}`);
     }
 
     // Duplicates warning (inline for bulk)
     const topDupe = data.duplicates[0];
     if (topDupe) {
       const pct = Math.round(topDupe.similarity * 100);
-      ticketLines.push("");
       ticketLines.push(
+        "",
         `> \u26a0\ufe0f Potential duplicate: **${topDupe.issueKey}** — ${topDupe.summary} (${pct}% overlap)`,
       );
     }
@@ -151,38 +168,8 @@ export function buildBulkPreviewCard(tickets: PreviewData[]): string {
     sections.push(ticketLines.join("\n"));
   }
 
-  // Shared conventions section (from first ticket that has them)
-  const firstWithConventions = tickets.find((t) => t.conventions.length > 0);
-  if (firstWithConventions) {
-    const conventionsText = formatConventionsSection(firstWithConventions.conventions);
-    if (conventionsText) {
-      sections.push(conventionsText);
-    }
-  }
-
-  // Shared insights (from first ticket that has them)
-  const firstWithInsights = tickets.find((t) => t.insights);
-  if (firstWithInsights?.insights) {
-    sections.push(firstWithInsights.insights);
-  }
-
-  // Shared KB context (from first ticket that has it)
-  const firstWithKb = tickets.find((t) => t.kbContext);
-  if (firstWithKb?.kbContext) {
-    sections.push(`## Knowledge Base Context\n\n${firstWithKb.kbContext}`);
-  }
-
-  // Shared schema guidance
-  const firstWithSchema = tickets.find((t) => t.schemaGuidance);
-  if (firstWithSchema?.schemaGuidance) {
-    sections.push(firstWithSchema.schemaGuidance);
-  }
-
-  // Shared field rules
-  const firstWithRules = tickets.find((t) => t.fieldRules);
-  if (firstWithRules?.fieldRules) {
-    sections.push(firstWithRules.fieldRules);
-  }
+  // Shared sections from first ticket that has each
+  appendSharedSections(sections, tickets);
 
   // Confirm prompt
   sections.push(`**Confirm?** Set \`confirmed: true\` to create all ${tickets.length} ${plural}.`);

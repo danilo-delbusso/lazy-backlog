@@ -43,32 +43,23 @@ interface LabelPair {
   count: number;
 }
 
-/**
- * Find label pairs that frequently appear together.
- * Rate = pair_count / min(labelA_total, labelB_total).
- * Returns pairs with rate > 0.3 and count ≥ 3, sorted by rate desc, top 20.
- */
-function computeLabelCooccurrence(tickets: TicketData[]): LabelPair[] {
-  // Count individual label frequencies
+/** Count label frequencies and pair frequencies across all tickets. */
+function collectLabelFrequencies(tickets: TicketData[]): {
+  labelFreq: Map<string, number>;
+  pairFreq: Map<string, number>;
+} {
   const labelFreq = new Map<string, number>();
-  // Count pair frequencies
   const pairFreq = new Map<string, number>();
 
   for (const t of tickets) {
-    if (t.labels.length < 2) {
-      // Still count single labels for frequency
-      for (const l of t.labels) {
-        labelFreq.set(l, (labelFreq.get(l) ?? 0) + 1);
-      }
-      continue;
-    }
-
     for (const l of t.labels) {
       labelFreq.set(l, (labelFreq.get(l) ?? 0) + 1);
     }
 
+    if (t.labels.length < 2) continue;
+
     // Generate sorted pairs to avoid duplicates
-    const sorted = [...t.labels].sort();
+    const sorted = [...t.labels].sort((a, b) => a.localeCompare(b));
     for (let i = 0; i < sorted.length; i++) {
       for (let j = i + 1; j < sorted.length; j++) {
         const key = `${sorted[i]}|||${sorted[j]}`;
@@ -77,16 +68,18 @@ function computeLabelCooccurrence(tickets: TicketData[]): LabelPair[] {
     }
   }
 
-  // Compute rates and filter
+  return { labelFreq, pairFreq };
+}
+
+/** Convert pair frequencies into rated LabelPair objects, filtered and sorted. */
+function buildLabelPairs(labelFreq: Map<string, number>, pairFreq: Map<string, number>): LabelPair[] {
   const pairs: LabelPair[] = [];
 
   for (const [key, count] of pairFreq) {
     if (count < 3) continue;
 
     const [labelA, labelB] = key.split("|||") as [string, string];
-    const freqA = labelFreq.get(labelA) ?? 0;
-    const freqB = labelFreq.get(labelB) ?? 0;
-    const minFreq = Math.min(freqA, freqB);
+    const minFreq = Math.min(labelFreq.get(labelA) ?? 0, labelFreq.get(labelB) ?? 0);
 
     if (minFreq === 0) continue;
 
@@ -101,9 +94,18 @@ function computeLabelCooccurrence(tickets: TicketData[]): LabelPair[] {
     }
   }
 
-  // Sort by rate desc, take top 20
   pairs.sort((a, b) => b.cooccurrenceRate - a.cooccurrenceRate);
   return pairs.slice(0, 20);
+}
+
+/**
+ * Find label pairs that frequently appear together.
+ * Rate = pair_count / min(labelA_total, labelB_total).
+ * Returns pairs with rate > 0.3 and count ≥ 3, sorted by rate desc, top 20.
+ */
+function computeLabelCooccurrence(tickets: TicketData[]): LabelPair[] {
+  const { labelFreq, pairFreq } = collectLabelFrequencies(tickets);
+  return buildLabelPairs(labelFreq, pairFreq);
 }
 
 // ─── Rework rates ────────────────────────────────────────────────────────────────

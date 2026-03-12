@@ -41,6 +41,48 @@ export function businessDaysBetween(start: string, end: string): number {
   return Math.max(count, 1);
 }
 
+// ─── Extracted helpers ────────────────────────────────────────────────────────────
+
+type TicketWithCycle = TicketData & { cycleDays: number };
+
+/** Build a frequency map of story points for a group of tickets. */
+function buildPointsDistribution(group: TicketWithCycle[]): Record<number, number> {
+  const distribution: Record<number, number> = {};
+  for (const t of group) {
+    if (t.storyPoints != null && t.storyPoints > 0) {
+      distribution[t.storyPoints] = (distribution[t.storyPoints] ?? 0) + 1;
+    }
+  }
+  return distribution;
+}
+
+/** Compute points-to-days ratio and estimation accuracy for pointed tickets. */
+function computePointsMetrics(group: TicketWithCycle[]): {
+  pointsToDaysRatio: number;
+  estimationAccuracy: number;
+} {
+  const withPoints = group.filter((t) => t.storyPoints != null && t.storyPoints > 0);
+
+  if (withPoints.length < 2) {
+    return { pointsToDaysRatio: 0, estimationAccuracy: 0 };
+  }
+
+  const pointsArr = withPoints.map((t) => t.storyPoints as number);
+  const cycleForPointed = withPoints.map((t) => t.cycleDays);
+  const medianPoints = median(pointsArr);
+
+  const pointsToDaysRatio = medianPoints > 0 ? median(cycleForPointed) / medianPoints : 0;
+
+  // Accuracy: how consistent is the days/points ratio across tickets
+  const ratios = withPoints.map((t) => t.cycleDays / (t.storyPoints as number));
+  const ratioMean = mean(ratios);
+  const ratioStddev = stddev(ratios);
+
+  const estimationAccuracy = ratioMean > 0 ? Math.max(0, Math.min(1, 1 - ratioStddev / ratioMean)) : 0;
+
+  return { pointsToDaysRatio, estimationAccuracy };
+}
+
 // ─── Main extractor ──────────────────────────────────────────────────────────────
 
 /**
@@ -72,36 +114,8 @@ export function extractEstimationInsights(tickets: TicketData[]): EstimationInsi
 
     const cycleDaysArr = group.map((t) => t.cycleDays);
     const medianCycleDays = median(cycleDaysArr);
-
-    // Points distribution
-    const pointsDistribution: Record<number, number> = {};
-    for (const t of group) {
-      if (t.storyPoints != null && t.storyPoints > 0) {
-        pointsDistribution[t.storyPoints] = (pointsDistribution[t.storyPoints] ?? 0) + 1;
-      }
-    }
-
-    // Points-to-days ratio and estimation accuracy (only for tickets with points)
-    const withPoints = group.filter((t) => t.storyPoints != null && t.storyPoints > 0);
-    let pointsToDaysRatio = 0;
-    let estimationAccuracy = 0;
-
-    if (withPoints.length >= 2) {
-      const pointsArr = withPoints.map((t) => t.storyPoints as number);
-      const cycleForPointed = withPoints.map((t) => t.cycleDays);
-      const medianPoints = median(pointsArr);
-
-      pointsToDaysRatio = medianPoints > 0 ? median(cycleForPointed) / medianPoints : 0;
-
-      // Accuracy: how consistent is the days/points ratio across tickets
-      const ratios = withPoints.map((t) => t.cycleDays / (t.storyPoints as number));
-      const ratioMean = mean(ratios);
-      const ratioStddev = stddev(ratios);
-
-      if (ratioMean > 0) {
-        estimationAccuracy = Math.max(0, Math.min(1, 1 - ratioStddev / ratioMean));
-      }
-    }
+    const pointsDistribution = buildPointsDistribution(group);
+    const { pointsToDaysRatio, estimationAccuracy } = computePointsMetrics(group);
 
     insights.push({
       issueType,
