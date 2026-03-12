@@ -37,7 +37,7 @@ function mapIssueToTicket(
   spField: string | undefined,
   adfToText: AdfToTextFn,
 ): TicketData {
-  const f = issue.fields as Record<string, unknown>;
+  const f = issue.fields;
   const str = (v: unknown, fallback = ""): string => (typeof v === "string" ? v : fallback);
   const nested = (key: string) => f[key] as Record<string, unknown> | undefined;
   const nestedName = (key: string, fallback: string): string => {
@@ -55,7 +55,7 @@ function mapIssueToTicket(
       | null,
     labels: (f.labels || []) as string[],
     components: ((f.components || []) as Array<{ name?: string }>).map((c) =>
-      typeof c.name === "string" ? c.name : String(c),
+      typeof c.name === "string" ? c.name : JSON.stringify(c),
     ),
     status: nestedName("status", "Unknown"),
     assignee: nested("assignee")?.displayName ? String(nested("assignee")?.displayName) : null,
