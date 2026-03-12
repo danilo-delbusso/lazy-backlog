@@ -122,7 +122,8 @@ export async function handleAssess(
       }
 
       if (score < 60 && (params.autoComment ?? true)) {
-        const comment = `This bug report is incomplete (score: ${score}%). Please add:\n${missing.map((m) => `- ${m}`).join("\n")}`;
+        const missingList = missing.map((m) => `- ${m}`).join("\n");
+        const comment = `This bug report is incomplete (score: ${score}%). Please add:\n${missingList}`;
         await jira.addComment(key, comment);
         await jira.addLabels(key, ["needs-info"]);
         out += "*Comment added + labeled `needs-info`*\n";

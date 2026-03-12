@@ -55,7 +55,14 @@ function buildBacklogJql(rawJql: string, projectKey?: string): string {
   const filterPart = (orderExec ? rawJql.slice(0, orderExec.index) : rawJql).trim();
 
   const hasSprint = /\bsprint\b/i.test(filterPart);
-  const backlogFilter = hasSprint ? filterPart : filterPart ? `sprint is EMPTY AND (${filterPart})` : "sprint is EMPTY";
+  let backlogFilter: string;
+  if (hasSprint) {
+    backlogFilter = filterPart;
+  } else if (filterPart) {
+    backlogFilter = `sprint is EMPTY AND (${filterPart})`;
+  } else {
+    backlogFilter = "sprint is EMPTY";
+  }
 
   const hasProject = /\bproject\s*(?:[=!]|in\b|is\b)/i.test(backlogFilter);
   const projectScoped = projectKey && !hasProject ? `project = ${projectKey} AND (${backlogFilter})` : backlogFilter;

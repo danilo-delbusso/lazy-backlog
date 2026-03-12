@@ -188,6 +188,48 @@ function validateSetupParams(
   return null;
 }
 
+function persistSetupConfig(
+  kb: KnowledgeBase,
+  projectKey: string,
+  boardId: string | undefined,
+  spaces: string[],
+): void {
+  const existing = kb.getConfig("atlassian");
+  let current: Record<string, unknown> = {};
+  if (existing) {
+    try {
+      current = JSON.parse(existing);
+    } catch {
+      /* fresh start */
+    }
+  }
+  current.jiraProjectKey = projectKey;
+  if (boardId) current.jiraBoardId = boardId;
+  if (spaces.length > 0) current.confluenceSpaces = spaces;
+  kb.setConfig("atlassian", JSON.stringify(current));
+}
+
+async function runConfluencePhase(
+  config: ReturnType<typeof resolveConfig>,
+  kb: KnowledgeBase,
+  spaces: string[],
+  maxDepth: number,
+  output: string[],
+): Promise<void> {
+  if (spaces.length > 0) {
+    try {
+      output.push(`## Confluence\n${await spiderSpaces(config, kb, spaces, maxDepth)}\n`);
+    } catch (err: unknown) {
+      output.push(`## Confluence: FAILED\n${err instanceof Error ? err.message : String(err)}\n`);
+    }
+  } else {
+    output.push(
+      "## Confluence\n**Not configured.** Confluence context makes ticket planning much richer. " +
+        "To enable, re-run setup with spaceKeys or set the CONFLUENCE_SPACES env var.\n",
+    );
+  }
+}
+
 async function handleSetup(
   params: {
     projectKey?: string;
@@ -215,21 +257,7 @@ async function handleSetup(
   if (validationError) return validationError;
 
   const resolvedProjectKey = projectKey as string;
-
-  // Persist setup params to config (consistent with handleSet)
-  const existing = kb.getConfig("atlassian");
-  let current: Record<string, unknown> = {};
-  if (existing) {
-    try {
-      current = JSON.parse(existing);
-    } catch {
-      /* fresh start */
-    }
-  }
-  current.jiraProjectKey = resolvedProjectKey;
-  if (boardId) current.jiraBoardId = boardId;
-  if (spaces.length > 0) current.confluenceSpaces = spaces;
-  kb.setConfig("atlassian", JSON.stringify(current));
+  persistSetupConfig(kb, resolvedProjectKey, boardId, spaces);
 
   // Phase 1: Jira Schema Discovery
   let schema: JiraSchema | null = null;
@@ -242,18 +270,7 @@ async function handleSetup(
   }
 
   // Phase 2: Confluence Spider
-  if (spaces.length > 0) {
-    try {
-      output.push(`## Confluence\n${await spiderSpaces(config, kb, spaces, params.maxDepth)}\n`);
-    } catch (err: unknown) {
-      output.push(`## Confluence: FAILED\n${err instanceof Error ? err.message : String(err)}\n`);
-    }
-  } else {
-    output.push(
-      "## Confluence\n**Not configured.** Confluence context makes ticket planning much richer. " +
-        "To enable, re-run setup with spaceKeys or set the CONFLUENCE_SPACES env var.\n",
-    );
-  }
+  await runConfluencePhase(config, kb, spaces, params.maxDepth, output);
 
   // Phase 3: Learn Team Conventions
   try {

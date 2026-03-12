@@ -64,7 +64,7 @@ export function buildJiraClient(kb: KnowledgeBase): { jira: JiraClient; config: 
     );
   }
   const schema = JiraClient.loadSchemaFromDb(kb);
-  if (!schema || schema.projectKey !== projectKey) {
+  if (schema?.projectKey !== projectKey) {
     const reason = schema
       ? `is for project ${schema.projectKey}, but current project is ${projectKey}`
       : "not discovered";
