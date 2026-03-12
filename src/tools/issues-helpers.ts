@@ -1,5 +1,11 @@
 import type { KnowledgeBase, PageSummary } from "../lib/db.js";
 import type { JiraSchema } from "../lib/jira.js";
+import type {
+  EstimationInsight,
+  OwnershipInsight,
+  PatternInsight,
+  TemplateInsight,
+} from "../lib/team-insights-types.js";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -167,8 +173,8 @@ export function extractKeywords(text: string): string[] {
   ];
 }
 
-/** Retrieve deep Confluence context for ticket planning. */
-export function retrieveConfluenceContext(kb: KnowledgeBase, description: string, spaceKey?: string) {
+/** Retrieve deep KB context for ticket planning. */
+export function retrieveKbContext(kb: KnowledgeBase, description: string, spaceKey?: string) {
   const opts = { spaceKey };
 
   const adrs = kb.getPageSummaries("adr", spaceKey);
@@ -263,8 +269,21 @@ export function buildSchemaGuidance(schema: JiraSchema | null, issueType: string
   return plan;
 }
 
-/** Build the Confluence context section for the ticket plan. */
-export function buildConfluenceSection(ctx: ReturnType<typeof retrieveConfluenceContext>): string {
+/** Load parsed team insights from the knowledge base. */
+export function loadTeamInsights(kb: KnowledgeBase) {
+  const estimation = kb.getInsights("estimation").map((r) => JSON.parse(r.data) as EstimationInsight);
+  const ownership = kb.getInsights("ownership").map((r) => JSON.parse(r.data) as OwnershipInsight);
+  const templates = kb.getInsights("templates").map((r) => JSON.parse(r.data) as TemplateInsight);
+  const patternsRaw = kb.getInsights("patterns");
+  const patterns: PatternInsight =
+    patternsRaw.length > 0
+      ? (JSON.parse(patternsRaw[0]?.data ?? "{}") as PatternInsight)
+      : { priorityDistribution: {}, labelCooccurrence: [], reworkRates: [] };
+  return { estimation, ownership, templates, patterns };
+}
+
+/** Build the KB context section for the ticket plan. */
+export function buildKbContextSection(ctx: ReturnType<typeof retrieveKbContext>): string {
   let plan = `## Confluence Context\n\n`;
   plan += `> **IMPORTANT:** You MUST reference relevant ADRs, design docs, and specs in ticket descriptions. Cite specific ADR numbers and technical constraints.\n\n`;
   plan += formatSummaries(ctx.adrs, "ADRs");

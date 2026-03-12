@@ -210,34 +210,34 @@ export function extractNamingRules(tickets: TicketData[]): TeamRule[] {
       percentage: `${pct(v.count, n)}%`,
     }));
 
-    rules.push({
-      category: "naming_convention",
-      rule_key: `first_verb/${type}`,
-      issue_type: type,
-      rule_value: JSON.stringify(topVerbs),
-      confidence: n > 0 ? verbFirstCount / n : 0,
-      sample_size: n,
-    });
-
-    rules.push({
-      category: "naming_convention",
-      rule_key: `avg_words/${type}`,
-      issue_type: type,
-      rule_value: String(Math.round(mean(wordCounts))),
-      confidence: Math.min(1, n / 20),
-      sample_size: n,
-    });
-
     const { pattern, confidence } = detectNamingPattern(verbFirstCount, tagPrefixCount, n);
 
-    rules.push({
-      category: "naming_convention",
-      rule_key: `pattern/${type}`,
-      issue_type: type,
-      rule_value: pattern,
-      confidence,
-      sample_size: n,
-    });
+    rules.push(
+      {
+        category: "naming_convention",
+        rule_key: `first_verb/${type}`,
+        issue_type: type,
+        rule_value: JSON.stringify(topVerbs),
+        confidence: n > 0 ? verbFirstCount / n : 0,
+        sample_size: n,
+      },
+      {
+        category: "naming_convention",
+        rule_key: `avg_words/${type}`,
+        issue_type: type,
+        rule_value: String(Math.round(mean(wordCounts))),
+        confidence: Math.min(1, n / 20),
+        sample_size: n,
+      },
+      {
+        category: "naming_convention",
+        rule_key: `pattern/${type}`,
+        issue_type: type,
+        rule_value: pattern,
+        confidence,
+        sample_size: n,
+      },
+    );
 
     // Best examples (top 3 by quality)
     const sorted = [...group].sort((a, b) => (qualityMap.get(b.key) ?? 0) - (qualityMap.get(a.key) ?? 0));
