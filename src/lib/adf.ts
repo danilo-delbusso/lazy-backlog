@@ -257,6 +257,8 @@ export function adfToText(adf: unknown): string {
     "blockquote",
     "mediaSingle",
     "rule",
+    "taskList",
+    "taskItem",
   ].includes(node.type as string);
 
   const childTexts = children.map((c: unknown) => adfToText(c));
@@ -269,6 +271,10 @@ export function adfToText(adf: unknown): string {
     joined = `${prefix} ${joined}`;
   } else if (node.type === "listItem") {
     joined = `- ${joined}`;
+  } else if (node.type === "taskItem") {
+    const state = (node.attrs as Record<string, unknown>)?.state;
+    const check = state === "DONE" ? "[x]" : "[ ]";
+    joined = `- ${check} ${joined}`;
   } else if (node.type === "codeBlock") {
     joined = `\`\`\`\n${joined}\n\`\`\``;
   }

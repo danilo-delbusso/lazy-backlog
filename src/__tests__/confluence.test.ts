@@ -139,6 +139,90 @@ describe("htmlToMarkdown", () => {
     expect(htmlToMarkdown("it&#39;s")).toContain("it's");
     expect(htmlToMarkdown("it&#x27;s")).toContain("it's");
   });
+
+  it("decodes &#x2F; entity", () => {
+    expect(htmlToMarkdown("path&#x2F;to&#x2F;file")).toBe("path/to/file");
+  });
+
+  it("converts <b> and <i> tags (not just strong/em)", () => {
+    expect(htmlToMarkdown("<b>bold</b>")).toContain("**bold**");
+    expect(htmlToMarkdown("<i>italic</i>")).toContain("*italic*");
+  });
+
+  it("converts <br> without trailing slash", () => {
+    expect(htmlToMarkdown("line1<br>line2")).toContain("line1\nline2");
+  });
+
+  it("handles table row with no headers and no cells (empty row)", () => {
+    const html = "<tr><div>ignored</div></tr>";
+    const md = htmlToMarkdown(html);
+    // empty row should not produce pipe characters
+    expect(md).not.toContain("|");
+  });
+
+  it("handles table with only data cells (no header row)", () => {
+    const html = "<tr><td>A</td><td>B</td></tr>";
+    const md = htmlToMarkdown(html);
+    expect(md).toContain("| A | B |");
+    expect(md).not.toContain("---");
+  });
+
+  it("handles nested tags inside headings", () => {
+    const html = "<h2><strong>Bold</strong> heading</h2>";
+    const md = htmlToMarkdown(html);
+    expect(md).toContain("## Bold heading");
+  });
+
+  it("handles multiple entities in sequence", () => {
+    expect(htmlToMarkdown("&lt;div&gt; &amp; &quot;text&quot;")).toBe('<div> & "text"');
+  });
+
+  it("handles link where text matches href exactly", () => {
+    const html = '<a href="https://example.com">https://example.com</a>';
+    const md = htmlToMarkdown(html);
+    // Should output just the URL, no markdown link syntax
+    expect(md).toBe("https://example.com");
+    expect(md).not.toContain("[");
+  });
+
+  it("handles link with nested tags in text", () => {
+    const html = '<a href="https://example.com"><strong>Click here</strong></a>';
+    const md = htmlToMarkdown(html);
+    expect(md).toContain("[Click here](https://example.com)");
+  });
+
+  it("strips images (no img tag conversion)", () => {
+    const html = '<p>Before <img src="photo.jpg" alt="photo"/> After</p>';
+    const md = htmlToMarkdown(html);
+    expect(md).not.toContain("<img");
+    expect(md).toContain("Before");
+    expect(md).toContain("After");
+  });
+
+  it("handles malformed/unclosed tags gracefully", () => {
+    const html = "<p>Unclosed paragraph<p>Another one";
+    const md = htmlToMarkdown(html);
+    expect(md).toContain("Unclosed paragraph");
+    expect(md).toContain("Another one");
+    expect(md).not.toContain("<p>");
+  });
+
+  it("handles deeply nested structure", () => {
+    const html = "<div><ul><li><strong>Nested <em>content</em></strong></li></ul></div>";
+    const md = htmlToMarkdown(html);
+    expect(md).toContain("- **Nested *content***");
+  });
+
+  it("handles pre block with language attribute", () => {
+    const html = '<pre class="language-js">const x = 1;</pre>';
+    const md = htmlToMarkdown(html);
+    expect(md).toContain("```");
+    expect(md).toContain("const x = 1;");
+  });
+
+  it("preserves plain text with no HTML", () => {
+    expect(htmlToMarkdown("Just plain text")).toBe("Just plain text");
+  });
 });
 
 // ── ConfluenceClient ─────────────────────────────────────────────────────────

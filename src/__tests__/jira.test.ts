@@ -1465,5 +1465,295 @@ describe("JiraClient", () => {
       expect(schema.board?.teamId).toBe("team-uuid");
       expect(schema.board?.teamName).toBe("Alpha");
     });
+
+    it("falls back to legacy createmeta endpoint when new endpoint fails", async () => {
+      const config = { siteUrl: "https://test.atlassian.net", email: "test@example.com", apiToken: "tok_123" };
+
+      // 1. Project info
+      mockFetchResponse({ name: "Legacy Project" });
+      // 2. New createmeta endpoint → 404
+      mockFetchError(404, "Not Found");
+      // 3. Legacy createmeta endpoint → success
+      mockFetchResponse({
+        projects: [
+          {
+            issuetypes: [
+              { id: "10", name: "Bug", subtask: false },
+              { id: "11", name: "Sub-task", subtask: true },
+            ],
+          },
+        ],
+      });
+      // 4. Fields for Bug
+      mockFetchResponse({
+        values: [
+          { fieldId: "summary", name: "Summary", required: true, schema: { type: "string", system: "summary" } },
+        ],
+      });
+      // 5. Fields for Sub-task
+      mockFetchResponse({ values: [] });
+      // 6. Priorities
+      mockFetchResponse([{ id: "1", name: "Critical" }]);
+      // 7. Statuses
+      mockFetchResponse([]);
+      // 8. Sample tickets
+      mockFetchResponse({ issues: [] });
+
+      const schema = await JiraClient.discoverSchema(config, "LEGACY");
+      expect(schema.projectName).toBe("Legacy Project");
+      expect(schema.issueTypes).toHaveLength(2);
+      expect(schema.issueTypes[0]?.name).toBe("Bug");
+      expect(schema.issueTypes[1]?.subtask).toBe(true);
+    });
+
+    it("handles field metadata fetch failure gracefully", async () => {
+      const config = { siteUrl: "https://test.atlassian.net", email: "test@example.com", apiToken: "tok_123" };
+
+      // 1. Project info
+      mockFetchResponse({ name: "Field Error Project" });
+      // 2. Issue types
+      mockFetchResponse({ values: [{ id: "1", name: "Task", subtask: false }] });
+      // 3. Fields endpoint → error (should be caught, resulting in empty fields)
+      mockFetchError(403, "Forbidden");
+      // 4. Priorities
+      mockFetchResponse([{ id: "1", name: "Medium" }]);
+      // 5. Statuses
+      mockFetchResponse([]);
+      // 6. Sample tickets
+      mockFetchResponse({ issues: [] });
+
+      const schema = await JiraClient.discoverSchema(config, "FE");
+      expect(schema.issueTypes).toHaveLength(1);
+      expect(schema.issueTypes[0]?.fields).toHaveLength(0);
+      expect(schema.issueTypes[0]?.requiredFields).toHaveLength(0);
+    });
+
+    it("discovers board without team field", async () => {
+      const config = { siteUrl: "https://test.atlassian.net", email: "test@example.com", apiToken: "tok_123" };
+
+      // 1. Project info
+      mockFetchResponse({ name: "No Team Project" });
+      // 2. Issue types (no team custom field)
+      mockFetchResponse({
+        values: [{ id: "1", name: "Task", subtask: false }],
+      });
+      // 3. Fields for Task (no team field)
+      mockFetchResponse({
+        values: [
+          { fieldId: "summary", name: "Summary", required: true, schema: { type: "string", system: "summary" } },
+        ],
+      });
+      // 4. Priorities
+      mockFetchResponse([{ id: "1", name: "Medium" }]);
+      // 5. Board config (no team → skip team sample)
+      mockFetchResponse({
+        name: "Kanban Board",
+        type: "kanban",
+        columnConfig: { columns: [{ name: "Backlog", statuses: [{ name: "Backlog" }] }] },
+      });
+      // 6. Statuses
+      mockFetchResponse([]);
+      // 7. Sample tickets
+      mockFetchResponse({ issues: [] });
+
+      const schema = await JiraClient.discoverSchema(config, "NT", "100");
+      expect(schema.board).toBeDefined();
+      expect(schema.board?.name).toBe("Kanban Board");
+      expect(schema.board?.type).toBe("kanban");
+      expect(schema.board?.teamFieldId).toBeUndefined();
+      expect(schema.board?.teamId).toBeUndefined();
+      expect(schema.board?.estimationField).toBeUndefined();
+    });
+
+    it("handles board config fetch failure gracefully", async () => {
+      const config = { siteUrl: "https://test.atlassian.net", email: "test@example.com", apiToken: "tok_123" };
+
+      // 1. Project info
+      mockFetchResponse({ name: "Board Error Project" });
+      // 2. Issue types
+      mockFetchResponse({ values: [{ id: "1", name: "Task", subtask: false }] });
+      // 3. Fields for Task
+      mockFetchResponse({ values: [] });
+      // 4. Priorities
+      mockFetchResponse([{ id: "1", name: "Medium" }]);
+      // 5. Board config → error (caught, board stays undefined)
+      mockFetchError(403, "Forbidden");
+      // 6. Statuses
+      mockFetchResponse([]);
+      // 7. Sample tickets
+      mockFetchResponse({ issues: [] });
+
+      const schema = await JiraClient.discoverSchema(config, "BE", "999");
+      expect(schema.board).toBeUndefined();
+    });
+
+    it("handles team value sample fetch failure", async () => {
+      const config = { siteUrl: "https://test.atlassian.net", email: "test@example.com", apiToken: "tok_123" };
+
+      // 1. Project info
+      mockFetchResponse({ name: "Team Error Project" });
+      // 2. Issue types
+      mockFetchResponse({
+        values: [{ id: "1", name: "Story", subtask: false }],
+      });
+      // 3. Fields with team field
+      mockFetchResponse({
+        values: [
+          { fieldId: "summary", name: "Summary", required: true, schema: { type: "string", system: "summary" } },
+          {
+            fieldId: "customfield_200",
+            name: "Team",
+            required: false,
+            schema: { type: "team", custom: "com.atlassian.teams:team" },
+          },
+        ],
+      });
+      // 4. Priorities
+      mockFetchResponse([{ id: "1", name: "High" }]);
+      // 5. Board config
+      mockFetchResponse({
+        name: "Sprint Board",
+        type: "scrum",
+        estimation: { field: { displayName: "Story Points" } },
+      });
+      // 6. Board ticket fetch → error (team sample fails, caught)
+      mockFetchError(403, "Forbidden");
+      // 7. Statuses
+      mockFetchResponse([]);
+      // 8. Sample tickets
+      mockFetchResponse({ issues: [] });
+
+      const schema = await JiraClient.discoverSchema(config, "TE", "200");
+      expect(schema.board).toBeDefined();
+      expect(schema.board?.name).toBe("Sprint Board");
+      expect(schema.board?.estimationField).toBe("Story Points");
+      // Team info should be absent since sample fetch failed
+      expect(schema.board?.teamFieldId).toBeUndefined();
+      expect(schema.board?.teamId).toBeUndefined();
+    });
+
+    it("handles board ticket with no team value", async () => {
+      const config = { siteUrl: "https://test.atlassian.net", email: "test@example.com", apiToken: "tok_123" };
+
+      // 1. Project info
+      mockFetchResponse({ name: "No Team Value" });
+      // 2. Issue types
+      mockFetchResponse({
+        values: [{ id: "1", name: "Story", subtask: false }],
+      });
+      // 3. Fields with team field
+      mockFetchResponse({
+        values: [
+          { fieldId: "summary", name: "Summary", required: true, schema: { type: "string", system: "summary" } },
+          {
+            fieldId: "customfield_300",
+            name: "Team",
+            required: false,
+            schema: { type: "team", custom: "com.atlassian.teams:team" },
+          },
+        ],
+      });
+      // 4. Priorities
+      mockFetchResponse([{ id: "1", name: "Medium" }]);
+      // 5. Board config
+      mockFetchResponse({ name: "Board", type: "scrum" });
+      // 6. Board ticket — team field is null (no team assigned)
+      mockFetchResponse({ issues: [{ fields: { customfield_300: null } }] });
+      // 7. Statuses
+      mockFetchResponse([]);
+      // 8. Sample tickets
+      mockFetchResponse({ issues: [] });
+
+      const schema = await JiraClient.discoverSchema(config, "NTV", "300");
+      expect(schema.board).toBeDefined();
+      // teamValue?.id is falsy → teamFieldId/teamId should not be set
+      expect(schema.board?.teamFieldId).toBeUndefined();
+      expect(schema.board?.teamId).toBeUndefined();
+    });
+
+    it("handles statuses fetch failure gracefully", async () => {
+      const config = { siteUrl: "https://test.atlassian.net", email: "test@example.com", apiToken: "tok_123" };
+
+      // 1. Project info
+      mockFetchResponse({ name: "Status Error Project" });
+      // 2. Issue types
+      mockFetchResponse({ values: [{ id: "1", name: "Task", subtask: false }] });
+      // 3. Fields for Task
+      mockFetchResponse({ values: [] });
+      // 4. Priorities
+      mockFetchResponse([{ id: "1", name: "Medium" }]);
+      // 5. Statuses → error (caught, statuses stays undefined)
+      mockFetchError(403, "Forbidden");
+      // 6. Sample tickets
+      mockFetchResponse({ issues: [] });
+
+      const schema = await JiraClient.discoverSchema(config, "SE");
+      expect(schema.statuses).toBeUndefined();
+      expect(schema.sampleTickets).toBeDefined();
+    });
+
+    it("handles sample tickets fetch failure gracefully", async () => {
+      const config = { siteUrl: "https://test.atlassian.net", email: "test@example.com", apiToken: "tok_123" };
+
+      // 1. Project info
+      mockFetchResponse({ name: "Sample Error Project" });
+      // 2. Issue types
+      mockFetchResponse({ values: [{ id: "1", name: "Task", subtask: false }] });
+      // 3. Fields for Task
+      mockFetchResponse({ values: [] });
+      // 4. Priorities
+      mockFetchResponse([{ id: "1", name: "Medium" }]);
+      // 5. Statuses
+      mockFetchResponse([{ name: "Task", statuses: [{ id: "1", name: "Open", statusCategory: { name: "To Do" } }] }]);
+      // 6. Sample tickets → error (caught, sampleTickets stays undefined)
+      mockFetchError(403, "Forbidden");
+
+      const schema = await JiraClient.discoverSchema(config, "SPE");
+      expect(schema.statuses).toHaveLength(1);
+      expect(schema.sampleTickets).toBeUndefined();
+    });
+
+    it("maps field metadata with key-based format (no fieldId)", async () => {
+      const config = { siteUrl: "https://test.atlassian.net", email: "test@example.com", apiToken: "tok_123" };
+
+      // 1. Project info
+      mockFetchResponse({ name: "Key Format" });
+      // 2. Issue types
+      mockFetchResponse({ values: [{ id: "1", name: "Task", subtask: false }] });
+      // 3. Fields with key-based format (legacy) — note: no fieldId, uses key instead
+      mockFetchResponse({
+        values: [
+          {
+            key: "summary",
+            name: "Summary",
+            required: true,
+            schema: { type: "string", system: "summary" },
+            allowedValues: [{ id: "1", name: "Option A", value: "a" }],
+          },
+          {
+            key: "customfield_50",
+            name: "Custom Field",
+            required: false,
+            schema: { type: "string" },
+          },
+        ],
+      });
+      // 4. Priorities
+      mockFetchResponse([{ id: "1", name: "Medium" }]);
+      // 5. Statuses
+      mockFetchResponse([]);
+      // 6. Sample tickets
+      mockFetchResponse({ issues: [] });
+
+      const schema = await JiraClient.discoverSchema(config, "KF");
+      const taskType = schema.issueTypes[0];
+      expect(taskType?.fields).toHaveLength(2);
+      // key-based field should use key as id
+      expect(taskType?.fields[0]?.id).toBe("summary");
+      expect(taskType?.fields[0]?.allowedValues).toHaveLength(1);
+      expect(taskType?.fields[0]?.allowedValues?.[0]?.name).toBe("Option A");
+      expect(taskType?.fields[1]?.id).toBe("customfield_50");
+      expect(taskType?.requiredFields).toContain("summary");
+    });
   });
 });

@@ -363,3 +363,168 @@ describe("computeSprintHealth", () => {
     expect(health.percentTodo).toBeCloseTo(50, 0);
   });
 });
+
+// ── Status Classification Improvements ──────────────────────────────────
+
+describe("computeVelocity — extended status classification", () => {
+  it('counts "Resolved" as done', () => {
+    const sprints: SprintData[] = [
+      {
+        id: "s1",
+        name: "Sprint 1",
+        issues: [
+          { key: "P-1", summary: "T", issueType: "Story", status: "Resolved", storyPoints: 5 },
+          { key: "P-2", summary: "T", issueType: "Story", status: "To Do", storyPoints: 3 },
+        ],
+      },
+    ];
+    const report = computeVelocity(sprints);
+    expect((report.sprints[0] as (typeof report.sprints)[number]).completed).toBe(5);
+    expect((report.sprints[0] as (typeof report.sprints)[number]).carryOver).toBe(3);
+  });
+
+  it('counts "Closed" and "Finished" as done', () => {
+    const sprints: SprintData[] = [
+      {
+        id: "s1",
+        name: "Sprint 1",
+        issues: [
+          { key: "P-1", summary: "T", issueType: "Story", status: "Closed", storyPoints: 4 },
+          { key: "P-2", summary: "T", issueType: "Story", status: "Finished", storyPoints: 6 },
+          { key: "P-3", summary: "T", issueType: "Story", status: "To Do", storyPoints: 2 },
+        ],
+      },
+    ];
+    const report = computeVelocity(sprints);
+    expect((report.sprints[0] as (typeof report.sprints)[number]).completed).toBe(10);
+    expect((report.sprints[0] as (typeof report.sprints)[number]).carryOver).toBe(2);
+  });
+
+  it('counts issues with statusCategory "done" as done', () => {
+    const sprints: SprintData[] = [
+      {
+        id: "s1",
+        name: "Sprint 1",
+        issues: [
+          { key: "P-1", summary: "T", issueType: "Story", status: "Released", statusCategory: "done", storyPoints: 7 },
+          { key: "P-2", summary: "T", issueType: "Story", status: "Open", storyPoints: 3 },
+        ],
+      },
+    ];
+    const report = computeVelocity(sprints);
+    expect((report.sprints[0] as (typeof report.sprints)[number]).completed).toBe(7);
+    expect((report.sprints[0] as (typeof report.sprints)[number]).carryOver).toBe(3);
+  });
+});
+
+describe("computeSprintHealth — extended status classification", () => {
+  it('classifies "Resolved" and "Closed" as done, not todo', () => {
+    const sprint: SprintData = {
+      id: "s1",
+      name: "Sprint 1",
+      issues: [
+        { key: "P-1", summary: "T", issueType: "Story", status: "Resolved", storyPoints: 1 },
+        { key: "P-2", summary: "T", issueType: "Story", status: "Closed", storyPoints: 1 },
+        { key: "P-3", summary: "T", issueType: "Story", status: "To Do", storyPoints: 1 },
+      ],
+    };
+    const health = computeSprintHealth(sprint, 100);
+    expect(health.percentDone).toBeCloseTo(66.7, 0);
+    expect(health.percentTodo).toBeCloseTo(33.3, 0);
+  });
+
+  it("uses statusCategory when available", () => {
+    const sprint: SprintData = {
+      id: "s1",
+      name: "Sprint 1",
+      issues: [
+        { key: "P-1", summary: "T", issueType: "Story", status: "Deployed", statusCategory: "done", storyPoints: 1 },
+        {
+          key: "P-2",
+          summary: "T",
+          issueType: "Story",
+          status: "Coding",
+          statusCategory: "indeterminate",
+          storyPoints: 1,
+        },
+        { key: "P-3", summary: "T", issueType: "Story", status: "Backlog", storyPoints: 1 },
+      ],
+    };
+    const health = computeSprintHealth(sprint, 100);
+    expect(health.percentDone).toBeCloseTo(33.3, 0);
+    expect(health.percentInProgress).toBeCloseTo(33.3, 0);
+    expect(health.percentTodo).toBeCloseTo(33.3, 0);
+  });
+
+  it('classifies "In Review" and "In Development" as in-progress', () => {
+    const sprint: SprintData = {
+      id: "s1",
+      name: "Sprint 1",
+      issues: [
+        { key: "P-1", summary: "T", issueType: "Story", status: "In Review", storyPoints: 1 },
+        { key: "P-2", summary: "T", issueType: "Story", status: "In Development", storyPoints: 1 },
+        { key: "P-3", summary: "T", issueType: "Story", status: "To Do", storyPoints: 1 },
+      ],
+    };
+    const health = computeSprintHealth(sprint, 100);
+    expect(health.percentInProgress).toBeCloseTo(66.7, 0);
+    expect(health.percentTodo).toBeCloseTo(33.3, 0);
+  });
+});
+
+describe("computeCycleTime — extended status classification", () => {
+  it('detects "Resolved" as a done transition in changelog', () => {
+    const report = computeCycleTime([
+      {
+        key: "PROJ-1",
+        summary: "Task 1",
+        issueType: "Story",
+        created: "2025-06-01T00:00:00Z",
+        changelog: [
+          { field: "status", fromString: "To Do", toString: "In Progress", created: "2025-06-02T00:00:00Z" },
+          { field: "status", fromString: "In Progress", toString: "Resolved", created: "2025-06-05T00:00:00Z" },
+        ],
+      },
+    ]);
+    expect(report.issues).toHaveLength(1);
+    expect((report.issues[0] as (typeof report.issues)[number]).cycleTimeHours).toBeCloseTo(72, 0);
+    expect((report.issues[0] as (typeof report.issues)[number]).leadTimeHours).toBeCloseTo(96, 0);
+  });
+
+  it('detects "Closed" as a done transition in changelog', () => {
+    const report = computeCycleTime([
+      {
+        key: "PROJ-2",
+        summary: "Task 2",
+        issueType: "Bug",
+        created: "2025-06-01T00:00:00Z",
+        changelog: [
+          { field: "status", fromString: "To Do", toString: "In Progress", created: "2025-06-01T00:00:00Z" },
+          { field: "status", fromString: "In Progress", toString: "Closed", created: "2025-06-03T00:00:00Z" },
+        ],
+      },
+    ]);
+    expect(report.issues).toHaveLength(1);
+    expect((report.issues[0] as (typeof report.issues)[number]).cycleTimeHours).toBeCloseTo(48, 0);
+  });
+
+  it('detects "In Review" as an in-progress transition for cycle time start', () => {
+    const report = computeCycleTime([
+      {
+        key: "PROJ-3",
+        summary: "Task 3",
+        issueType: "Story",
+        created: "2025-06-01T00:00:00Z",
+        changelog: [
+          { field: "status", fromString: "To Do", toString: "In Review", created: "2025-06-03T00:00:00Z" },
+          { field: "status", fromString: "In Review", toString: "Done", created: "2025-06-06T00:00:00Z" },
+        ],
+      },
+    ]);
+    expect(report.issues).toHaveLength(1);
+    // Cycle time: June 3 -> June 6 = 72 hours
+    expect((report.issues[0] as (typeof report.issues)[number]).cycleTimeHours).toBeCloseTo(72, 0);
+    // Lead time: June 1 -> June 6 = 120 hours
+    expect((report.issues[0] as (typeof report.issues)[number]).leadTimeHours).toBeCloseTo(120, 0);
+  });
+});

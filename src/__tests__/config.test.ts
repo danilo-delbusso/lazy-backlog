@@ -2,8 +2,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { errorResponse, formatLabels, resolveConfig, textResponse } from "../lib/config.js";
+import { adfToText } from "../lib/adf.js";
+import { buildJiraClient, errorResponse, formatLabels, resolveConfig, textResponse } from "../lib/config.js";
 import { KnowledgeBase } from "../lib/db.js";
+import { JiraClient } from "../lib/jira.js";
 
 let kb: KnowledgeBase;
 let tmpDir: string;
@@ -139,5 +141,120 @@ describe("formatLabels", () => {
 
   it("returns 'none' for non-array JSON", () => {
     expect(formatLabels('"string"')).toBe("none");
+  });
+});
+
+// ── buildJiraClient ─────────────────────────────────────────────────────────
+
+describe("buildJiraClient", () => {
+  it("throws when schema projectKey doesn't match resolved config projectKey", () => {
+    process.env.JIRA_PROJECT_KEY = "FRONTEND";
+    JiraClient.saveSchemaToDb(kb, {
+      projectKey: "BACKEND",
+      projectName: "Backend",
+      boardId: "100",
+      issueTypes: [],
+      priorities: [],
+      statuses: [],
+    });
+
+    expect(() => buildJiraClient(kb)).toThrow(/BACKEND.*FRONTEND/);
+  });
+
+  it("error message mentions both project keys on mismatch", () => {
+    process.env.JIRA_PROJECT_KEY = "NEW";
+    JiraClient.saveSchemaToDb(kb, {
+      projectKey: "OLD",
+      projectName: "Old Project",
+      boardId: "50",
+      issueTypes: [],
+      priorities: [],
+      statuses: [],
+    });
+
+    expect(() => buildJiraClient(kb)).toThrow("OLD");
+    expect(() => buildJiraClient(kb)).toThrow("NEW");
+  });
+});
+
+// ── adfToText ───────────────────────────────────────────────────────────────
+
+describe("adfToText", () => {
+  it("renders taskList with TODO taskItem as '- [ ] text'", () => {
+    const adf = {
+      type: "doc",
+      version: 1,
+      content: [
+        {
+          type: "taskList",
+          attrs: { localId: "tl-1" },
+          content: [
+            {
+              type: "taskItem",
+              attrs: { localId: "ti-1", state: "TODO" },
+              content: [{ type: "text", text: "Buy milk" }],
+            },
+          ],
+        },
+      ],
+    };
+    const text = adfToText(adf);
+    expect(text).toContain("- [ ] Buy milk");
+  });
+
+  it("renders taskItem with state DONE as '- [x] text'", () => {
+    const adf = {
+      type: "doc",
+      version: 1,
+      content: [
+        {
+          type: "taskList",
+          attrs: { localId: "tl-2" },
+          content: [
+            {
+              type: "taskItem",
+              attrs: { localId: "ti-2", state: "DONE" },
+              content: [{ type: "text", text: "Write tests" }],
+            },
+          ],
+        },
+      ],
+    };
+    const text = adfToText(adf);
+    expect(text).toContain("- [x] Write tests");
+  });
+
+  it("renders multiple task items with newline separation", () => {
+    const adf = {
+      type: "doc",
+      version: 1,
+      content: [
+        {
+          type: "taskList",
+          attrs: { localId: "tl-3" },
+          content: [
+            {
+              type: "taskItem",
+              attrs: { localId: "ti-3", state: "TODO" },
+              content: [{ type: "text", text: "First task" }],
+            },
+            {
+              type: "taskItem",
+              attrs: { localId: "ti-4", state: "DONE" },
+              content: [{ type: "text", text: "Second task" }],
+            },
+            {
+              type: "taskItem",
+              attrs: { localId: "ti-5", state: "TODO" },
+              content: [{ type: "text", text: "Third task" }],
+            },
+          ],
+        },
+      ],
+    };
+    const text = adfToText(adf);
+    expect(text).toContain("- [ ] First task\n");
+    expect(text).toContain("- [x] Second task\n");
+    expect(text).toContain("- [ ] Third task\n");
   });
 });

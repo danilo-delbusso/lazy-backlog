@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { KnowledgeBase } from "../lib/db.js";
 import { JiraClient, type JiraIssueDetail, type JiraSchema } from "../lib/jira.js";
-import { registerBugsTool } from "../tools/bugs.js";
+import { assessCompleteness, inferSeverity, registerBugsTool } from "../tools/bugs.js";
 import { createMockServer } from "./helpers/mock-server.js";
 
 // ── Fetch mock ───────────────────────────────────────────────────────────────
@@ -679,5 +679,369 @@ describe("registerBugsTool", () => {
 
       getIssueSpy.mockRestore();
     });
+
+    it("single issue: infers high severity for blocking keywords", async () => {
+      const { server, getTool } = createMockServer();
+      registerBugsTool(server, () => kb);
+      JiraClient.saveSchemaToDb(kb, testSchema);
+
+      const getIssueSpy = vi
+        .spyOn(JiraClient.prototype, "getIssue")
+        .mockResolvedValue(makeIssueDetail("BP-1", { summary: "This regression blocks all users" }));
+      const listSprintsSpy = vi
+        .spyOn(JiraClient.prototype, "listSprints")
+        .mockResolvedValue([{ id: 10, name: "Sprint 10", state: "future" }]);
+
+      const bugs = getTool("bugs");
+      const result = await bugs({ action: "triage", issueKeys: ["BP-1"] });
+      const text = getText(result);
+      expect(text).toContain("high");
+      expect(text).toContain("Sprint 10");
+
+      getIssueSpy.mockRestore();
+      listSprintsSpy.mockRestore();
+    });
+
+    it("single issue: infers low severity for cosmetic issues", async () => {
+      const { server, getTool } = createMockServer();
+      registerBugsTool(server, () => kb);
+      JiraClient.saveSchemaToDb(kb, testSchema);
+
+      const getIssueSpy = vi
+        .spyOn(JiraClient.prototype, "getIssue")
+        .mockResolvedValue(makeIssueDetail("BP-1", { summary: "Minor typo in footer" }));
+      const listSprintsSpy = vi.spyOn(JiraClient.prototype, "listSprints").mockResolvedValue([
+        { id: 10, name: "Sprint 10", state: "future" },
+        { id: 11, name: "Sprint 11", state: "future" },
+      ]);
+
+      const bugs = getTool("bugs");
+      const result = await bugs({ action: "triage", issueKeys: ["BP-1"] });
+      const text = getText(result);
+      expect(text).toContain("low");
+      // Low severity goes to last future sprint
+      expect(text).toContain("Sprint 11");
+
+      getIssueSpy.mockRestore();
+      listSprintsSpy.mockRestore();
+    });
+
+    it("single issue: handles no active sprint for critical severity", async () => {
+      const { server, getTool } = createMockServer();
+      registerBugsTool(server, () => kb);
+      JiraClient.saveSchemaToDb(kb, testSchema);
+
+      const getIssueSpy = vi
+        .spyOn(JiraClient.prototype, "getIssue")
+        .mockResolvedValue(makeIssueDetail("BP-1", { summary: "Production crash" }));
+      const listSprintsSpy = vi.spyOn(JiraClient.prototype, "listSprints").mockResolvedValue([]);
+
+      const bugs = getTool("bugs");
+      const result = await bugs({ action: "triage", issueKeys: ["BP-1"] });
+      const text = getText(result);
+      expect(text).toContain("No active sprint found");
+
+      getIssueSpy.mockRestore();
+      listSprintsSpy.mockRestore();
+    });
+
+    it("single issue: handles no future sprint for high severity", async () => {
+      const { server, getTool } = createMockServer();
+      registerBugsTool(server, () => kb);
+      JiraClient.saveSchemaToDb(kb, testSchema);
+
+      const getIssueSpy = vi
+        .spyOn(JiraClient.prototype, "getIssue")
+        .mockResolvedValue(makeIssueDetail("BP-1", { summary: "Blocking regression" }));
+      const listSprintsSpy = vi.spyOn(JiraClient.prototype, "listSprints").mockResolvedValue([]);
+
+      const bugs = getTool("bugs");
+      const result = await bugs({ action: "triage", issueKeys: ["BP-1"] });
+      const text = getText(result);
+      expect(text).toContain("No future sprints found");
+
+      getIssueSpy.mockRestore();
+      listSprintsSpy.mockRestore();
+    });
+
+    it("single issue: handles no future sprint for low severity", async () => {
+      const { server, getTool } = createMockServer();
+      registerBugsTool(server, () => kb);
+      JiraClient.saveSchemaToDb(kb, testSchema);
+
+      const getIssueSpy = vi
+        .spyOn(JiraClient.prototype, "getIssue")
+        .mockResolvedValue(makeIssueDetail("BP-1", { summary: "Minor cosmetic typo" }));
+      const listSprintsSpy = vi.spyOn(JiraClient.prototype, "listSprints").mockResolvedValue([]);
+
+      const bugs = getTool("bugs");
+      const result = await bugs({ action: "triage", issueKeys: ["BP-1"] });
+      const text = getText(result);
+      expect(text).toContain("No future sprints available");
+
+      getIssueSpy.mockRestore();
+      listSprintsSpy.mockRestore();
+    });
+
+    it("single issue: high severity with autoAssign moves to future sprint", async () => {
+      const { server, getTool } = createMockServer();
+      registerBugsTool(server, () => kb);
+      JiraClient.saveSchemaToDb(kb, testSchema);
+
+      const getIssueSpy = vi
+        .spyOn(JiraClient.prototype, "getIssue")
+        .mockResolvedValue(makeIssueDetail("BP-1", { summary: "Blocking all users" }));
+      const listSprintsSpy = vi
+        .spyOn(JiraClient.prototype, "listSprints")
+        .mockResolvedValue([{ id: 20, name: "Sprint 20", state: "future" }]);
+      const moveToSprintSpy = vi.spyOn(JiraClient.prototype, "moveIssuesToSprint").mockResolvedValue(undefined);
+      const addCommentSpy = vi.spyOn(JiraClient.prototype, "addComment").mockResolvedValue(undefined);
+
+      const bugs = getTool("bugs");
+      await bugs({ action: "triage", issueKeys: ["BP-1"], autoAssign: true });
+
+      expect(moveToSprintSpy).toHaveBeenCalledWith("20", ["BP-1"]);
+      expect(addCommentSpy).toHaveBeenCalledWith("BP-1", expect.stringContaining("Sprint 20"));
+
+      getIssueSpy.mockRestore();
+      listSprintsSpy.mockRestore();
+      moveToSprintSpy.mockRestore();
+      addCommentSpy.mockRestore();
+    });
+
+    it("single issue: low severity with autoAssign moves to last future sprint", async () => {
+      const { server, getTool } = createMockServer();
+      registerBugsTool(server, () => kb);
+      JiraClient.saveSchemaToDb(kb, testSchema);
+
+      const getIssueSpy = vi
+        .spyOn(JiraClient.prototype, "getIssue")
+        .mockResolvedValue(makeIssueDetail("BP-1", { summary: "Cosmetic edge case" }));
+      const listSprintsSpy = vi.spyOn(JiraClient.prototype, "listSprints").mockResolvedValue([
+        { id: 10, name: "Sprint 10", state: "future" },
+        { id: 11, name: "Sprint 11", state: "future" },
+      ]);
+      const moveToSprintSpy = vi.spyOn(JiraClient.prototype, "moveIssuesToSprint").mockResolvedValue(undefined);
+      const addCommentSpy = vi.spyOn(JiraClient.prototype, "addComment").mockResolvedValue(undefined);
+
+      const bugs = getTool("bugs");
+      await bugs({ action: "triage", issueKeys: ["BP-1"], autoAssign: true });
+
+      expect(moveToSprintSpy).toHaveBeenCalledWith("11", ["BP-1"]);
+      expect(addCommentSpy).toHaveBeenCalledWith("BP-1", expect.stringContaining("Sprint 11"));
+
+      getIssueSpy.mockRestore();
+      listSprintsSpy.mockRestore();
+      moveToSprintSpy.mockRestore();
+      addCommentSpy.mockRestore();
+    });
+  });
+
+  // ── action=find-bugs with custom JQL ────────────────────────────────────
+
+  describe("action=find-bugs with custom JQL", () => {
+    it("uses custom JQL without injecting dateRange or component", async () => {
+      const { server, getTool } = createMockServer();
+      registerBugsTool(server, () => kb);
+      JiraClient.saveSchemaToDb(kb, testSchema);
+
+      const searchSpy = vi.spyOn(JiraClient.prototype, "searchBoardIssues").mockResolvedValue({ issues: [], total: 0 });
+
+      const bugs = getTool("bugs");
+      await bugs({ action: "find-bugs", jql: "type = Bug AND priority = High", dateRange: "7d", component: "Backend" });
+
+      const jql = searchSpy.mock.calls[0]?.[1] as string;
+      expect(jql).toBe("type = Bug AND priority = High");
+      expect(jql).not.toContain("created >=");
+      expect(jql).not.toContain("component =");
+
+      searchSpy.mockRestore();
+    });
+  });
+
+  // ── action=search edge cases ────────────────────────────────────────────
+
+  describe("action=search edge cases", () => {
+    it("returns error when jql is missing", async () => {
+      const { server, getTool } = createMockServer();
+      registerBugsTool(server, () => kb);
+      JiraClient.saveSchemaToDb(kb, testSchema);
+
+      const bugs = getTool("bugs");
+      const result = await bugs({ action: "search" });
+      expect(result.isError).toBe(true);
+      expect(getText(result)).toContain("jql is required");
+    });
+
+    it("extracts ORDER BY clause correctly", async () => {
+      const { server, getTool } = createMockServer();
+      registerBugsTool(server, () => kb);
+      JiraClient.saveSchemaToDb(kb, testSchema);
+
+      const searchSpy = vi.spyOn(JiraClient.prototype, "searchBoardIssues").mockResolvedValue({
+        issues: [],
+        total: 0,
+      });
+
+      const bugs = getTool("bugs");
+      await bugs({ action: "search", jql: "priority = High ORDER BY created DESC" });
+
+      const jql = searchSpy.mock.calls[0]?.[1] as string;
+      expect(jql).toContain("ORDER BY created DESC");
+      expect(jql).toContain("type = Bug");
+
+      searchSpy.mockRestore();
+    });
+
+    it("does not add project scope when project is already in JQL", async () => {
+      const { server, getTool } = createMockServer();
+      registerBugsTool(server, () => kb);
+      JiraClient.saveSchemaToDb(kb, testSchema);
+
+      const searchSpy = vi.spyOn(JiraClient.prototype, "searchBoardIssues").mockResolvedValue({
+        issues: [],
+        total: 0,
+      });
+
+      const bugs = getTool("bugs");
+      await bugs({ action: "search", jql: "project = OTHER AND priority = High" });
+
+      const jql = searchSpy.mock.calls[0]?.[1] as string;
+      // Should not double-add project scope
+      const projectMatches = jql.match(/project\s*=/gi);
+      expect(projectMatches).toHaveLength(1);
+
+      searchSpy.mockRestore();
+    });
+  });
+});
+
+// ── inferSeverity (unit tests) ────────────────────────────────────────────
+
+describe("inferSeverity", () => {
+  it("returns critical for data loss keyword", () => {
+    const result = inferSeverity("There was data loss in the migration");
+    expect(result.severity).toBe("critical");
+    expect(result.matches[0]).toContain("data loss");
+  });
+
+  it("returns critical for security keyword", () => {
+    const result = inferSeverity("Security vulnerability found in auth");
+    expect(result.severity).toBe("critical");
+    expect(result.matches[0]).toContain("security");
+  });
+
+  it("returns high for blocking keyword", () => {
+    const result = inferSeverity("This is blocking all users from login");
+    expect(result.severity).toBe("high");
+    expect(result.matches[0]).toContain("blocking");
+  });
+
+  it("returns high for regression keyword", () => {
+    const result = inferSeverity("This is a regression from last release");
+    expect(result.severity).toBe("high");
+    expect(result.matches[0]).toContain("regression");
+  });
+
+  it("returns low for cosmetic keyword", () => {
+    const result = inferSeverity("Cosmetic issue with button alignment");
+    expect(result.severity).toBe("low");
+    expect(result.matches[0]).toContain("cosmetic");
+  });
+
+  it("returns low for typo keyword", () => {
+    const result = inferSeverity("Fix typo in the header");
+    expect(result.severity).toBe("low");
+    expect(result.matches[0]).toContain("typo");
+  });
+
+  it("returns low for workaround keyword", () => {
+    const result = inferSeverity("There is a workaround available");
+    expect(result.severity).toBe("low");
+    expect(result.matches[0]).toContain("workaround");
+  });
+
+  it("returns low for edge case keyword", () => {
+    const result = inferSeverity("Only affects an edge case scenario");
+    expect(result.severity).toBe("low");
+    expect(result.matches[0]).toContain("edge case");
+  });
+
+  it("returns medium when no keywords match", () => {
+    const result = inferSeverity("Button color is slightly off");
+    expect(result.severity).toBe("medium");
+    expect(result.matches).toContain("no specific keywords found");
+  });
+
+  it("is case-insensitive", () => {
+    const result = inferSeverity("PRODUCTION DOWN since morning");
+    expect(result.severity).toBe("critical");
+  });
+
+  it("critical takes precedence over high", () => {
+    const result = inferSeverity("crash that blocks all users");
+    expect(result.severity).toBe("critical");
+  });
+});
+
+// ── assessCompleteness (unit tests) ───────────────────────────────────────
+
+describe("assessCompleteness", () => {
+  it("returns 0 for empty description, no labels, no components", () => {
+    const { score, missing } = assessCompleteness("", [], []);
+    expect(score).toBe(0);
+    expect(missing).toHaveLength(5);
+  });
+
+  it("returns 100 for fully complete bug", () => {
+    const desc =
+      "This is a detailed description exceeding fifty characters easily. " +
+      "Steps to reproduce: 1. Open app. " +
+      "Expected: It works. Actual: It crashes. " +
+      "Environment: Chrome 120";
+    const { score, missing } = assessCompleteness(desc, ["bug"], []);
+    expect(score).toBe(100);
+    expect(missing).toHaveLength(0);
+  });
+
+  it("accepts 'steps to repro' as alternative to 'steps to reproduce'", () => {
+    const desc = "A sufficiently long description that passes the fifty char threshold. Steps to repro: click button.";
+    const { score } = assessCompleteness(desc, [], []);
+    // 25 (desc) + 25 (steps) = 50
+    expect(score).toBe(50);
+  });
+
+  it("accepts 'version' keyword for environment check", () => {
+    const desc = "A sufficiently long description that passes the fifty char threshold." + " Version: 2.0.1";
+    const { score } = assessCompleteness(desc, [], []);
+    // 25 (desc) + 15 (env) = 40
+    expect(score).toBe(40);
+  });
+
+  it("accepts 'browser' keyword for environment check", () => {
+    const desc = "A sufficiently long description that passes the fifty char threshold." + " Browser: Firefox 120";
+    const { score } = assessCompleteness(desc, [], []);
+    expect(score).toBe(40);
+  });
+
+  it("gives 15 points for components even without labels", () => {
+    const { score } = assessCompleteness("short", [], ["frontend"]);
+    expect(score).toBe(15);
+  });
+
+  it("scores 25 for description only", () => {
+    const desc = "This is a fairly long description that definitely exceeds fifty characters in total length.";
+    const { score, missing } = assessCompleteness(desc, [], []);
+    expect(score).toBe(25);
+    expect(missing).toContain("Steps to reproduce");
+    expect(missing).toContain("Expected vs actual behavior");
+    expect(missing).toContain("Environment/version info");
+    expect(missing).toContain("Labels or components");
+  });
+
+  it("handles undefined description", () => {
+    const { score, missing } = assessCompleteness(undefined, [], []);
+    expect(score).toBe(0);
+    expect(missing).toContain("Detailed description (>50 chars)");
   });
 });

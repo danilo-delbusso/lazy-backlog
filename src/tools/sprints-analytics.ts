@@ -242,7 +242,8 @@ export async function handleHealthAction(
       summary: i.fields.summary,
       issueType: i.fields.issuetype?.name || "Unknown",
       status: i.fields.status?.name || "Unknown",
-      storyPoints: (i.fields as Record<string, unknown>).story_points as number | undefined,
+      statusCategory: i.fields.status?.statusCategory?.name,
+      storyPoints: getStoryPoints(i.fields, spFieldId) || undefined,
       assignee: (i.fields as Record<string, unknown>).assignee
         ? ((i.fields as Record<string, unknown>).assignee as { displayName?: string })?.displayName
         : undefined,

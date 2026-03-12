@@ -27,7 +27,8 @@ export async function fetchSprintData(jira: JiraClient, boardId: string, count: 
         summary: i.fields.summary,
         issueType: i.fields.issuetype?.name || "Unknown",
         status: i.fields.status?.name || "Unknown",
-        storyPoints: (i.fields as Record<string, unknown>).story_points as number | undefined,
+        statusCategory: i.fields.status?.statusCategory?.name,
+        storyPoints: getStoryPoints(i.fields, jira.storyPointsFieldId) || undefined,
         assignee: (i.fields as Record<string, unknown>).assignee
           ? ((i.fields as Record<string, unknown>).assignee as { displayName?: string })?.displayName
           : undefined,

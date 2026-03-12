@@ -112,9 +112,23 @@ export function percentile(values: number[], p: number): number {
 
 // ── Computations ────────────────────────────────────────────────────────────
 
+const DONE_STATUSES = new Set(["done", "closed", "resolved", "finished", "fixed", "complete", "completed"]);
+const IN_PROGRESS_STATUSES = new Set(["in progress", "in review", "review", "in development", "working", "started"]);
+
+function isDoneStatus(status: string, statusCategory?: string): boolean {
+  if (statusCategory?.toLowerCase() === "done") return true;
+  const lower = status.toLowerCase();
+  return DONE_STATUSES.has(lower) || lower.includes("done");
+}
+
+function isInProgressStatus(status: string, statusCategory?: string): boolean {
+  if (statusCategory?.toLowerCase() === "indeterminate") return true;
+  const lower = status.toLowerCase();
+  return IN_PROGRESS_STATUSES.has(lower) || lower.includes("progress");
+}
+
 function isDone(issue: SprintIssueData): boolean {
-  if (issue.statusCategory?.toLowerCase() === "done") return true;
-  return issue.status.toLowerCase().includes("done");
+  return isDoneStatus(issue.status, issue.statusCategory);
 }
 
 /** Compute velocity report across sprints. */
@@ -158,12 +172,12 @@ export function computeCycleTime(
     const statusChanges = issue.changelog.filter((c) => c.field === "status");
 
     // Find first "In Progress" transition
-    const firstInProgress = statusChanges.find((c) => c.toString?.toLowerCase().includes("in progress"));
+    const firstInProgress = statusChanges.find((c) => (c.toString ? isInProgressStatus(c.toString) : false));
 
     // Find last "Done" transition
     let lastDone: ChangelogItem | undefined;
     for (const change of statusChanges) {
-      if (change.toString?.toLowerCase().includes("done")) {
+      if (change.toString && isDoneStatus(change.toString)) {
         lastDone = change;
       }
     }
@@ -262,8 +276,8 @@ export function computeSprintHealth(sprint: SprintData, velocityAverage: number)
   for (const issue of sprint.issues) {
     const statusLower = issue.status.toLowerCase();
     if (statusLower.includes("block")) blockerCount++;
-    if (statusLower.includes("done")) doneCount++;
-    else if (statusLower.includes("progress")) inProgressCount++;
+    if (isDoneStatus(issue.status, issue.statusCategory)) doneCount++;
+    else if (isInProgressStatus(issue.status, issue.statusCategory)) inProgressCount++;
     else todoCount++;
   }
 

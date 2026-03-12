@@ -50,16 +50,15 @@ async function handleList(params: { maxResults?: number }, kb: KnowledgeBase): P
 }
 
 function buildBacklogJql(rawJql: string, projectKey?: string): string {
-  const orderExec = /\s+(ORDER\s+BY\s+[^\n]+)$/i.exec(rawJql);
+  const orderExec = /(?:^|\s+)(ORDER\s+BY\s+[^\n]+)$/i.exec(rawJql);
   const orderClause = orderExec ? ` ${orderExec[1]}` : " ORDER BY rank ASC";
-  const filterPart = orderExec ? rawJql.slice(0, orderExec.index) : rawJql;
+  const filterPart = (orderExec ? rawJql.slice(0, orderExec.index) : rawJql).trim();
 
-  const backlogFilter = /\bsprint\s/i.test(filterPart) ? filterPart : `sprint is EMPTY AND (${filterPart})`;
+  const hasSprint = /\bsprint\b/i.test(filterPart);
+  const backlogFilter = hasSprint ? filterPart : filterPart ? `sprint is EMPTY AND (${filterPart})` : "sprint is EMPTY";
 
-  const projectScoped =
-    projectKey && !/\bproject\s*[=!]/i.test(backlogFilter)
-      ? `project = ${projectKey} AND (${backlogFilter})`
-      : backlogFilter;
+  const hasProject = /\bproject\s*(?:[=!]|in\b|is\b)/i.test(backlogFilter);
+  const projectScoped = projectKey && !hasProject ? `project = ${projectKey} AND (${backlogFilter})` : backlogFilter;
 
   return `${projectScoped}${orderClause}`;
 }

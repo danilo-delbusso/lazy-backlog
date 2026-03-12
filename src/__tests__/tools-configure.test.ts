@@ -156,6 +156,24 @@ describe("action=set", () => {
     expect(stored.jiraBoardId).toBe("266");
   });
 
+  it("returns error when auth env vars are missing", async () => {
+    delete process.env.ATLASSIAN_SITE_URL;
+    delete process.env.ATLASSIAN_EMAIL;
+    delete process.env.ATLASSIAN_API_TOKEN;
+
+    const { server, getTool } = createMockServer();
+    registerConfigureTool(server, () => kb);
+
+    const configure = getTool("configure");
+    const result = await configure({
+      action: "set",
+      jiraProjectKey: "BP",
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("Atlassian auth not configured");
+  });
+
   it("returns summary of saved settings", async () => {
     const { server, getTool } = createMockServer();
     registerConfigureTool(server, () => kb);
@@ -215,6 +233,48 @@ describe("action=get", () => {
 
     expect(text).toContain("BP");
     expect(text).toContain("JIRA_PROJECT_KEY");
+  });
+
+  it("shows board ID from SQLite config", async () => {
+    kb.setConfig("atlassian", JSON.stringify({ jiraBoardId: "266" }));
+
+    const { server, getTool } = createMockServer();
+    registerConfigureTool(server, () => kb);
+
+    const configure = getTool("configure");
+    const result = await configure({ action: "get" });
+    const text = result.content[0]?.text ?? "";
+
+    expect(text).toContain("266");
+    expect(text).toContain("SQLite");
+  });
+
+  it("shows setup status section with schema and rules info", async () => {
+    const { server, getTool } = createMockServer();
+    registerConfigureTool(server, () => kb);
+
+    const configure = getTool("configure");
+    const result = await configure({ action: "get" });
+    const text = result.content[0]?.text ?? "";
+
+    expect(text).toContain("Setup Status");
+    expect(text).toContain("Jira Schema");
+    expect(text).toContain("Team Conventions");
+    expect(text).toContain("Confluence KB");
+  });
+
+  it("returns error when auth env vars are missing", async () => {
+    delete process.env.ATLASSIAN_SITE_URL;
+    delete process.env.ATLASSIAN_EMAIL;
+    delete process.env.ATLASSIAN_API_TOKEN;
+
+    const { server, getTool } = createMockServer();
+    registerConfigureTool(server, () => kb);
+
+    const configure = getTool("configure");
+    const result = await configure({ action: "get" });
+
+    expect(result.isError).toBe(true);
   });
 });
 
@@ -404,6 +464,148 @@ describe("action=setup", () => {
     const text = result.content[0]?.text ?? "";
 
     expect(text).toContain("No completed tickets found");
+    expect(text).toContain("Setup complete");
+  });
+
+  it("persists projectKey, boardId, and spaceKeys to config", async () => {
+    const { server, getTool } = createMockServer();
+    registerConfigureTool(server, () => kb);
+
+    // Mock Jira discovery
+    mockFetchResponse({ key: "BP", name: "Backlog", id: "10000" });
+    mockFetchResponse({ values: [{ id: "1", name: "Task", subtask: false }] });
+    mockFetchResponse({ values: [] });
+    mockFetchResponse([{ id: "1", name: "Medium" }]);
+    mockFetchResponse([]);
+    mockFetchResponse({ issues: [] });
+
+    // Mock learn-team: empty
+    mockSearchIssues.mockResolvedValue({ issues: [], total: 0 });
+
+    const configure = getTool("configure");
+    await configure({
+      action: "setup",
+      projectKey: "PROJ",
+      boardId: "42",
+      spaceKeys: ["ENG", "PM"],
+    });
+
+    const stored = JSON.parse(kb.getConfig("atlassian") ?? "{}");
+    expect(stored.jiraProjectKey).toBe("PROJ");
+    expect(stored.jiraBoardId).toBe("42");
+    expect(stored.confluenceSpaces).toEqual(["ENG", "PM"]);
+  });
+
+  it("merges setup params into existing config without overwriting other keys", async () => {
+    // Pre-populate config with an extra key
+    kb.setConfig("atlassian", JSON.stringify({ rootPageIds: ["111"], jiraBoardId: "99" }));
+
+    const { server, getTool } = createMockServer();
+    registerConfigureTool(server, () => kb);
+
+    // Mock Jira discovery
+    mockFetchResponse({ key: "NEW", name: "NewProject", id: "20000" });
+    mockFetchResponse({ values: [{ id: "2", name: "Bug", subtask: false }] });
+    mockFetchResponse({ values: [] });
+    mockFetchResponse([{ id: "2", name: "High" }]);
+    mockFetchResponse([]);
+    mockFetchResponse({ issues: [] });
+
+    // Mock learn-team: empty
+    mockSearchIssues.mockResolvedValue({ issues: [], total: 0 });
+
+    const configure = getTool("configure");
+    await configure({ action: "setup", projectKey: "NEW" });
+
+    const stored = JSON.parse(kb.getConfig("atlassian") ?? "{}");
+    // New value persisted
+    expect(stored.jiraProjectKey).toBe("NEW");
+    // Existing keys preserved
+    expect(stored.rootPageIds).toEqual(["111"]);
+    // boardId comes from existing config since not passed in params
+    expect(stored.jiraBoardId).toBe("99");
+  });
+
+  it("returns error when missing projectKey and no env fallback", async () => {
+    delete process.env.JIRA_PROJECT_KEY;
+
+    // Pre-populate config without jiraProjectKey
+    kb.setConfig("atlassian", JSON.stringify({ jiraBoardId: "10" }));
+
+    const { server, getTool } = createMockServer();
+    registerConfigureTool(server, () => kb);
+
+    const configure = getTool("configure");
+    const result = await configure({ action: "setup" });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("Setup needs more info");
+    expect(result.content[0]?.text).toContain("projectKey");
+  });
+
+  it("saves Jira schema to DB during setup", async () => {
+    const { server, getTool } = createMockServer();
+    registerConfigureTool(server, () => kb);
+
+    // Mock Jira discovery: project, createmeta, fields×2, priorities, statuses, samples
+    mockFetchResponse({ key: "BP", name: "Backlog", id: "10000" });
+    mockFetchResponse({
+      values: [
+        { id: "1", name: "Task", subtask: false },
+        { id: "2", name: "Story", subtask: false },
+      ],
+    });
+    mockFetchResponse({ values: [] }); // fields for Task
+    mockFetchResponse({ values: [] }); // fields for Story
+    mockFetchResponse([
+      { id: "1", name: "High" },
+      { id: "2", name: "Low" },
+    ]);
+    mockFetchResponse([]); // statuses
+    mockFetchResponse({ issues: [] }); // sample issues
+
+    // Mock learn-team: empty
+    mockSearchIssues.mockResolvedValue({ issues: [], total: 0 });
+
+    const configure = getTool("configure");
+    const result = await configure({ action: "setup", projectKey: "BP" });
+    const text = result.content[0]?.text ?? "";
+
+    // Schema details appear in output
+    expect(text).toContain("2 issue types");
+    expect(text).toContain("2 priorities");
+
+    // Schema was saved — verify via the config table (saveSchemaToDb writes there)
+    const schemaJson = kb.getConfig("jira-schema");
+    expect(schemaJson).toBeTruthy();
+    const schema = JSON.parse(schemaJson ?? "");
+    expect(schema.projectKey).toBe("BP");
+  });
+
+  it("reports team conventions failure without crashing", async () => {
+    const { server, getTool } = createMockServer();
+    registerConfigureTool(server, () => kb);
+
+    // Mock Jira discovery
+    mockFetchResponse({ key: "BP", name: "Backlog", id: "10000" });
+    mockFetchResponse({ values: [{ id: "1", name: "Task", subtask: false }] });
+    mockFetchResponse({ values: [] });
+    mockFetchResponse([{ id: "1", name: "Medium" }]);
+    mockFetchResponse([]);
+    mockFetchResponse({ issues: [] });
+
+    // Make searchIssues throw to simulate team-learning failure
+    mockSearchIssues.mockRejectedValue(new Error("Jira search exploded"));
+
+    const configure = getTool("configure");
+    const result = await configure({ action: "setup", projectKey: "BP" });
+    const text = result.content[0]?.text ?? "";
+
+    // Setup should still succeed overall, with a failure note for team conventions
+    expect(result.isError).toBeFalsy();
+    expect(text).toContain("Jira Schema");
+    expect(text).toContain("FAILED");
+    expect(text).toContain("Jira search exploded");
     expect(text).toContain("Setup complete");
   });
 

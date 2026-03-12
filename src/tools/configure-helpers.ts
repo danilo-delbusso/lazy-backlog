@@ -38,6 +38,7 @@ async function fetchTickets(
   adfToText: AdfToTextFn,
 ): Promise<TicketData[]> {
   const jql = `project = ${resolvedProjectKey} AND status in (Done, Closed, Resolved) ORDER BY updated DESC`;
+  const spField = jira.storyPointsFieldId;
   const extendedFields = [
     "summary",
     "description",
@@ -51,6 +52,7 @@ async function fetchTickets(
     "updated",
     "resolutiondate",
     "fixVersions",
+    ...(spField ? [spField] : ["customfield_10016"]),
   ];
   const allTickets: TicketData[] = [];
   let startAt = 0;
@@ -74,7 +76,11 @@ async function fetchTickets(
         description: adfToText(f.description),
         issueType: nestedName("issuetype", "Unknown"),
         priority: nestedName("priority", "Medium"),
-        storyPoints: (f.story_points ?? f.storyPoints ?? f.customfield_10016 ?? null) as number | null,
+        storyPoints: ((spField ? f[spField] : null) ??
+          f.story_points ??
+          f.storyPoints ??
+          f.customfield_10016 ??
+          null) as number | null,
         labels: (f.labels || []) as string[],
         components: ((f.components || []) as Array<{ name?: string }>).map((c) =>
           typeof c.name === "string" ? c.name : String(c),

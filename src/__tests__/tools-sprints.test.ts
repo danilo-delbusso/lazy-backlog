@@ -336,6 +336,69 @@ describe("registerSprintsTool", () => {
       expect(result.isError).toBe(true);
       expect(result.content[0]?.text).toContain("name is required");
     });
+
+    it("creates sprint without goal (no updateSprint call)", async () => {
+      const { server, getTool } = createMockServer();
+      registerSprintsTool(server, () => kb);
+
+      mockFetchResponse({
+        id: 101,
+        name: "Sprint 101",
+        state: "future",
+        startDate: "2026-04-01T00:00:00Z",
+        endDate: "2026-04-14T00:00:00Z",
+      });
+
+      const sprints = getTool("sprints");
+      const result = await sprints({
+        action: "create",
+        name: "Sprint 101",
+        startDate: "2026-04-01T00:00:00Z",
+        endDate: "2026-04-14T00:00:00Z",
+      });
+      const text = result.content[0]?.text ?? "";
+      expect(text).toContain("Sprint Created");
+      expect(text).toContain("Sprint 101");
+      expect(text).toContain("future");
+      expect(text).toContain("**Start:**");
+      expect(text).toContain("**End:**");
+      // No goal provided, so only 1 fetch (createSprint) — no updateSprint
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("returns error when boardId is missing", async () => {
+      const { server, getTool } = createMockServer();
+      // Clear JIRA_BOARD_ID and save schema without boardId
+      delete process.env.JIRA_BOARD_ID;
+      const noBoardSchema = { ...testSchema, boardId: "" };
+      JiraClient.saveSchemaToDb(kb, noBoardSchema);
+
+      registerSprintsTool(server, () => kb);
+
+      const sprints = getTool("sprints");
+      const result = await sprints({ action: "create", name: "Sprint X" });
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text).toContain("board");
+    });
+
+    it("shows goal from created response when no params.goal", async () => {
+      const { server, getTool } = createMockServer();
+      registerSprintsTool(server, () => kb);
+
+      mockFetchResponse({
+        id: 102,
+        name: "Sprint 102",
+        state: "future",
+        goal: "Server-set goal",
+      });
+
+      const sprints = getTool("sprints");
+      const result = await sprints({ action: "create", name: "Sprint 102" });
+      const text = result.content[0]?.text ?? "";
+      expect(text).toContain("Sprint Created");
+      // The created.goal should show even though params.goal was not set
+      expect(text).toContain("Server-set goal");
+    });
   });
 
   describe("action=move-issues", () => {
@@ -352,6 +415,49 @@ describe("registerSprintsTool", () => {
       expect(text).toContain("Moved 2 issues");
       expect(text).toContain("BP-1");
       expect(text).toContain("BP-2");
+    });
+
+    it("returns error without sprintId", async () => {
+      const { server, getTool } = createMockServer();
+      registerSprintsTool(server, () => kb);
+
+      const sprints = getTool("sprints");
+      const result = await sprints({ action: "move-issues", issueKeys: ["BP-1"] });
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text).toContain("sprintId is required");
+    });
+
+    it("returns error without issueKeys", async () => {
+      const { server, getTool } = createMockServer();
+      registerSprintsTool(server, () => kb);
+
+      const sprints = getTool("sprints");
+      const result = await sprints({ action: "move-issues", sprintId: "10" });
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text).toContain("issueKeys is required");
+    });
+
+    it("returns error with empty issueKeys array", async () => {
+      const { server, getTool } = createMockServer();
+      registerSprintsTool(server, () => kb);
+
+      const sprints = getTool("sprints");
+      const result = await sprints({ action: "move-issues", sprintId: "10", issueKeys: [] });
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text).toContain("issueKeys is required");
+    });
+
+    it("uses singular 'issue' for single item", async () => {
+      const { server, getTool } = createMockServer();
+      registerSprintsTool(server, () => kb);
+
+      fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+      const sprints = getTool("sprints");
+      const result = await sprints({ action: "move-issues", sprintId: "10", issueKeys: ["BP-1"] });
+      const text = result.content[0]?.text ?? "";
+      expect(text).toContain("Moved 1 issue ");
+      expect(text).not.toContain("issues");
     });
   });
 
@@ -1401,6 +1507,23 @@ describe("registerSprintsTool", () => {
       const result = await sprints({ action: "goal" });
       expect(result.isError).toBe(true);
       expect(result.content[0]?.text).toContain("sprintId is required");
+    });
+
+    it("shows '(no goal set)' when sprint has no goal", async () => {
+      const { server, getTool } = createMockServer();
+      registerSprintsTool(server, () => kb);
+
+      mockFetchResponse({
+        id: 60,
+        name: "Sprint 60",
+        state: "active",
+      });
+
+      const sprints = getTool("sprints");
+      const result = await sprints({ action: "goal", sprintId: "60" });
+      const text = result.content[0]?.text ?? "";
+      expect(text).toContain("Sprint Goal");
+      expect(text).toContain("(no goal set)");
     });
   });
 });

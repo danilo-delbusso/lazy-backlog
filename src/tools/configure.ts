@@ -216,6 +216,21 @@ async function handleSetup(
 
   const resolvedProjectKey = projectKey as string;
 
+  // Persist setup params to config (consistent with handleSet)
+  const existing = kb.getConfig("atlassian");
+  let current: Record<string, unknown> = {};
+  if (existing) {
+    try {
+      current = JSON.parse(existing);
+    } catch {
+      /* fresh start */
+    }
+  }
+  current.jiraProjectKey = resolvedProjectKey;
+  if (boardId) current.jiraBoardId = boardId;
+  if (spaces.length > 0) current.confluenceSpaces = spaces;
+  kb.setConfig("atlassian", JSON.stringify(current));
+
   // Phase 1: Jira Schema Discovery
   let schema: JiraSchema | null = null;
   try {

@@ -245,6 +245,79 @@ describe("registerBacklogTool", () => {
     });
   });
 
+  describe("action=search (JQL fallback — no board ID)", () => {
+    /**
+     * When no board ID is configured, search falls back to buildBacklogJql.
+     * These tests verify JQL construction through the public tool interface.
+     */
+    const noBoardSchema: JiraSchema = { ...testSchema, boardId: "" };
+
+    it("doesn't produce invalid JQL when user JQL starts with ORDER BY", async () => {
+      delete process.env.JIRA_BOARD_ID;
+      const { server, getTool } = createMockServer();
+      registerBacklogTool(server, () => kb);
+      JiraClient.saveSchemaToDb(kb, noBoardSchema);
+
+      const searchSpy = vi.spyOn(JiraClient.prototype, "searchIssues").mockResolvedValue({
+        issues: [],
+        total: 0,
+      });
+
+      const backlog = getTool("backlog");
+      await backlog({ action: "search", jql: "ORDER BY created DESC" });
+
+      const jql = searchSpy.mock.calls[0]?.[0] as string;
+      // Should not produce "sprint is EMPTY AND () ORDER BY ..." — empty filter before ORDER BY
+      expect(jql).not.toMatch(/AND\s*\(\s*\)/);
+      expect(jql).toContain("ORDER BY created DESC");
+
+      searchSpy.mockRestore();
+    });
+
+    it("doesn't prepend 'sprint is EMPTY' when JQL contains sprint filter", async () => {
+      delete process.env.JIRA_BOARD_ID;
+      const { server, getTool } = createMockServer();
+      registerBacklogTool(server, () => kb);
+      JiraClient.saveSchemaToDb(kb, noBoardSchema);
+
+      const searchSpy = vi.spyOn(JiraClient.prototype, "searchIssues").mockResolvedValue({
+        issues: [],
+        total: 0,
+      });
+
+      const backlog = getTool("backlog");
+      await backlog({ action: "search", jql: "sprint = 5" });
+
+      const jql = searchSpy.mock.calls[0]?.[0] as string;
+      expect(jql).not.toContain("sprint is EMPTY");
+      expect(jql).toContain("sprint = 5");
+
+      searchSpy.mockRestore();
+    });
+
+    it("doesn't add extra project scoping when JQL contains 'project in (...)'", async () => {
+      delete process.env.JIRA_BOARD_ID;
+      const { server, getTool } = createMockServer();
+      registerBacklogTool(server, () => kb);
+      JiraClient.saveSchemaToDb(kb, noBoardSchema);
+
+      const searchSpy = vi.spyOn(JiraClient.prototype, "searchIssues").mockResolvedValue({
+        issues: [],
+        total: 0,
+      });
+
+      const backlog = getTool("backlog");
+      await backlog({ action: "search", jql: 'project in (BP, FE) AND status = "To Do"' });
+
+      const jql = searchSpy.mock.calls[0]?.[0] as string;
+      // Should not have "project = BP AND (...)" wrapping since JQL already has project scope
+      const projectMatches = jql.match(/\bproject\b/gi);
+      expect(projectMatches).toHaveLength(1);
+
+      searchSpy.mockRestore();
+    });
+  });
+
   describe("action=rank", () => {
     it("ranks issue before another", async () => {
       const { server, getTool } = createMockServer();

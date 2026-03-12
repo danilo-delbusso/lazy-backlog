@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   adfToText,
   analyzeBacklog,
+  buildQualityMap,
   type ChangelogItem,
   DEFAULT_RULES,
   extractComponentRules,
@@ -12,10 +13,16 @@ import {
   extractSprintCompositionRules,
   extractWorkflowRules,
   formatTeamStyleGuide,
+  mean,
+  median,
   mergeWithDefaults,
+  pct,
+  percentile,
   scoreTicketQuality,
+  stddev,
   type TeamRule,
   type TicketData,
+  topN,
 } from "../lib/team-rules.js";
 
 // ─── Test Data Helpers ──────────────────────────────────────────────────────
@@ -224,6 +231,85 @@ describe("scoreTicketQuality", () => {
     const score = scoreTicketQuality(ticket);
     expect(score.total).toBeLessThan(30);
   });
+
+  it("scores higher for longer descriptions (100-300-500 char thresholds)", () => {
+    const short = makeTicket({ description: "x".repeat(50) });
+    const medium = makeTicket({ description: "x".repeat(150) });
+    const long = makeTicket({ description: "x".repeat(350) });
+    const veryLong = makeTicket({ description: "x".repeat(550) });
+
+    const shortScore = scoreTicketQuality(short).description;
+    const mediumScore = scoreTicketQuality(medium).description;
+    const longScore = scoreTicketQuality(long).description;
+    const veryLongScore = scoreTicketQuality(veryLong).description;
+
+    expect(mediumScore).toBeGreaterThan(shortScore);
+    expect(longScore).toBeGreaterThan(mediumScore);
+    expect(veryLongScore).toBeGreaterThan(longScore);
+  });
+
+  it("scores description with context section keywords", () => {
+    const withContext = makeTicket({
+      description: "## Context\nSome background info about the feature requirements",
+    });
+    const withoutContext = makeTicket({ description: "Just a plain sentence" });
+    expect(scoreTicketQuality(withContext).description).toBeGreaterThan(scoreTicketQuality(withoutContext).description);
+  });
+
+  it("gives metadata bonus for non-Medium priority", () => {
+    const medium = makeTicket({ priority: "Medium" });
+    const high = makeTicket({ priority: "High" });
+    expect(scoreTicketQuality(high).metadata).toBeGreaterThan(scoreTicketQuality(medium).metadata);
+  });
+
+  it("caps metadata score at 30", () => {
+    const maxMetadata = makeTicket({
+      storyPoints: 5,
+      labels: ["tech-debt"],
+      components: ["backend"],
+      priority: "Critical",
+    });
+    expect(scoreTicketQuality(maxMetadata).metadata).toBeLessThanOrEqual(30);
+  });
+
+  it("scores process for description updates in changelog", () => {
+    const withDescUpdate = makeTicket({
+      changelog: [
+        ...makeChangelog([{ from: "To Do", to: "In Progress", daysAfterCreate: 1 }]),
+        { field: "description", from: "old", to: "new", timestamp: "2025-01-02T00:00:00Z" },
+      ],
+    });
+    const withoutDescUpdate = makeTicket({
+      changelog: makeChangelog([{ from: "To Do", to: "In Progress", daysAfterCreate: 1 }]),
+    });
+    expect(scoreTicketQuality(withDescUpdate).process).toBeGreaterThan(scoreTicketQuality(withoutDescUpdate).process);
+  });
+
+  it("scores process for resolutionDate", () => {
+    const withResolution = makeTicket({ resolutionDate: "2025-01-10T00:00:00Z" });
+    const withoutResolution = makeTicket({ resolutionDate: null });
+    expect(scoreTicketQuality(withResolution).process).toBeGreaterThan(scoreTicketQuality(withoutResolution).process);
+  });
+
+  it("gives process bonus for 3+ unique statuses in changelog", () => {
+    const threeStatuses = makeTicket({
+      changelog: makeChangelog([
+        { from: "To Do", to: "In Progress", daysAfterCreate: 1 },
+        { from: "In Progress", to: "In Review", daysAfterCreate: 3 },
+        { from: "In Review", to: "Done", daysAfterCreate: 5 },
+      ]),
+    });
+    const twoStatuses = makeTicket({
+      changelog: makeChangelog([{ from: "To Do", to: "Done", daysAfterCreate: 1 }]),
+    });
+    expect(scoreTicketQuality(threeStatuses).process).toBeGreaterThan(scoreTicketQuality(twoStatuses).process);
+  });
+
+  it("handles null description gracefully", () => {
+    const ticket = makeTicket({ description: undefined as unknown as string });
+    const score = scoreTicketQuality(ticket);
+    expect(score.description).toBe(0);
+  });
 });
 
 // ─── extractDescriptionRules ────────────────────────────────────────────────
@@ -413,6 +499,67 @@ describe("extractWorkflowRules", () => {
     expect(bottleneck).toBeDefined();
     expect(bottleneck?.rule_value).toBe("In Progress");
   });
+
+  it("returns empty rules when all tickets have empty changelogs", () => {
+    const tickets = Array.from({ length: 5 }, (_, i) => makeTicket({ key: `NC-${i}`, changelog: [] }));
+    expect(extractWorkflowRules(tickets)).toEqual([]);
+  });
+
+  it("handles tickets with single transition (no sequence)", () => {
+    const tickets = Array.from({ length: 3 }, (_, i) =>
+      makeTicket({
+        key: `ST-${i}`,
+        changelog: makeChangelog([{ from: "To Do", to: "Done", daysAfterCreate: 1 }]),
+      }),
+    );
+    const rules = extractWorkflowRules(tickets);
+    // Should produce rules even with minimal transitions
+    expect(rules.length).toBeGreaterThan(0);
+    const daysRule = rules.find((r) => r.rule_key === "avg_days_per_status");
+    expect(daysRule).toBeDefined();
+  });
+
+  it("calculates avg_total_days from resolution dates", () => {
+    const tickets = Array.from({ length: 3 }, (_, i) =>
+      makeTicket({
+        key: `LD-${i}`,
+        resolutionDate: "2025-01-10T00:00:00Z",
+        changelog: makeChangelog([
+          { from: "To Do", to: "In Progress", daysAfterCreate: 1 },
+          { from: "In Progress", to: "Done", daysAfterCreate: 5 },
+        ]),
+      }),
+    );
+    const rules = extractWorkflowRules(tickets);
+    const leadTime = rules.find((r) => r.rule_key === "avg_total_days");
+    expect(leadTime).toBeDefined();
+    expect(Number(leadTime?.rule_value)).toBeGreaterThan(0);
+  });
+
+  it("handles changelog entries with null from/to fields", () => {
+    const tickets = [
+      makeTicket({
+        key: "NULL-1",
+        changelog: [
+          {
+            field: "status",
+            from: null,
+            to: "In Progress",
+            timestamp: "2025-01-02T00:00:00Z",
+          },
+          {
+            field: "status",
+            from: "In Progress",
+            to: null,
+            timestamp: "2025-01-05T00:00:00Z",
+          },
+        ],
+      }),
+    ];
+    // Should not throw
+    const rules = extractWorkflowRules(tickets);
+    expect(rules.length).toBeGreaterThan(0);
+  });
 });
 
 // ─── extractComponentRules ───────────────────────────────────────────────────
@@ -538,6 +685,14 @@ describe("extractSprintCompositionRules", () => {
     expect(mix.Story).toBe("100%");
     expect(Object.keys(mix)).toHaveLength(1);
   });
+
+  it("returns avg_points_per_ticket of 0 when no tickets have points", () => {
+    const tickets = Array.from({ length: 3 }, (_, i) => makeTicket({ key: `NP-${i}`, storyPoints: null }));
+    const rules = extractSprintCompositionRules(tickets);
+    const avgRule = rules.find((r) => r.rule_key === "avg_points_per_ticket");
+    expect(avgRule).toBeDefined();
+    expect(avgRule?.rule_value).toBe("0");
+  });
 });
 
 // ─── extractNamingConvention (tag-prefix detection) ──────────────────────────
@@ -662,6 +817,67 @@ describe("mergeWithDefaults", () => {
     const happyPath = merged.find((r) => r.rule_key === "happy_path");
     expect(happyPath).toBeDefined();
   });
+
+  it("replaces low-confidence team rule with default at exact threshold boundary", () => {
+    const atBoundary: TeamRule = {
+      category: "naming_convention",
+      rule_key: "pattern/Story",
+      issue_type: "Story",
+      rule_value: "tag-prefix",
+      confidence: 0.5,
+      sample_size: 9,
+    };
+    const merged = mergeWithDefaults([atBoundary], DEFAULT_RULES);
+    const match = merged.find((r) => r.category === "naming_convention" && r.rule_key === "pattern/Story");
+    expect(match).toBeDefined();
+    // sample_size 9 < 10, so default should win
+    expect(match?.rule_value).toBe("verb-first");
+  });
+
+  it("keeps team rule at exact passing threshold (confidence=0.5, sample_size=10)", () => {
+    const atThreshold: TeamRule = {
+      category: "naming_convention",
+      rule_key: "pattern/Story",
+      issue_type: "Story",
+      rule_value: "tag-prefix",
+      confidence: 0.5,
+      sample_size: 10,
+    };
+    const merged = mergeWithDefaults([atThreshold], DEFAULT_RULES);
+    const match = merged.find((r) => r.category === "naming_convention" && r.rule_key === "pattern/Story");
+    expect(match?.rule_value).toBe("tag-prefix");
+  });
+
+  it("includes team rules with no matching default", () => {
+    const customRule: TeamRule = {
+      category: "custom_category",
+      rule_key: "custom_key",
+      issue_type: null,
+      rule_value: "custom",
+      confidence: 0.9,
+      sample_size: 50,
+    };
+    const merged = mergeWithDefaults([customRule], DEFAULT_RULES);
+    const match = merged.find((r) => r.category === "custom_category");
+    expect(match).toBeDefined();
+    expect(match?.rule_value).toBe("custom");
+    // Should also include all defaults
+    expect(merged.length).toBe(DEFAULT_RULES.length + 1);
+  });
+
+  it("handles null issue_type in team rules correctly", () => {
+    const teamRule: TeamRule = {
+      category: "label_patterns",
+      rule_key: "avg_per_ticket",
+      issue_type: null,
+      rule_value: "2.5",
+      confidence: 0.9,
+      sample_size: 50,
+    };
+    const merged = mergeWithDefaults([teamRule], DEFAULT_RULES);
+    const match = merged.find((r) => r.rule_key === "avg_per_ticket");
+    expect(match?.rule_value).toBe("2.5");
+  });
 });
 
 // ─── formatTeamStyleGuide ───────────────────────────────────────────────────
@@ -693,5 +909,491 @@ describe("formatTeamStyleGuide", () => {
   it("handles empty rules array", () => {
     const result = formatTeamStyleGuide([]);
     expect(result).toContain("No rules available");
+  });
+
+  it("shows ticket count when totalSamples > 0", () => {
+    const rules: TeamRule[] = [
+      {
+        category: "description_structure",
+        rule_key: "avg_length/Story",
+        issue_type: "Story",
+        rule_value: "400",
+        confidence: 0.9,
+        sample_size: 50,
+      },
+    ];
+    const result = formatTeamStyleGuide(rules);
+    expect(result).toContain("learned from 50 tickets");
+  });
+
+  it("omits *(default)* suffix for rules with sample_size > 0", () => {
+    const rules: TeamRule[] = [
+      {
+        category: "description_structure",
+        rule_key: "avg_length/Story",
+        issue_type: "Story",
+        rule_value: "400",
+        confidence: 0.9,
+        sample_size: 30,
+      },
+    ];
+    const result = formatTeamStyleGuide(rules);
+    expect(result).not.toContain("*(default)*");
+  });
+
+  it("formats has_structure_pct description rule", () => {
+    const rules: TeamRule[] = [
+      {
+        category: "description_structure",
+        rule_key: "has_structure_pct/Story",
+        issue_type: "Story",
+        rule_value: "75%",
+        confidence: 0.8,
+        sample_size: 20,
+      },
+    ];
+    const result = formatTeamStyleGuide(rules);
+    expect(result).toContain("75% of tickets have structured descriptions");
+  });
+
+  it("skips empty section_headings array", () => {
+    const rules: TeamRule[] = [
+      {
+        category: "description_structure",
+        rule_key: "section_headings/Story",
+        issue_type: "Story",
+        rule_value: "[]",
+        confidence: 0,
+        sample_size: 10,
+      },
+    ];
+    const result = formatTeamStyleGuide(rules);
+    // Should not contain numbered heading lines
+    expect(result).not.toContain("1. **");
+  });
+
+  it("formats naming avg_words rule", () => {
+    const rules: TeamRule[] = [
+      {
+        category: "naming_convention",
+        rule_key: "avg_words/Bug",
+        issue_type: "Bug",
+        rule_value: "6",
+        confidence: 0.8,
+        sample_size: 25,
+      },
+    ];
+    const result = formatTeamStyleGuide(rules);
+    expect(result).toContain("**Bug**: avg 6 words");
+  });
+
+  it("formats naming examples rule", () => {
+    const rules: TeamRule[] = [
+      {
+        category: "naming_convention",
+        rule_key: "examples/Story",
+        issue_type: "Story",
+        rule_value: JSON.stringify(["Add login page", "Implement caching"]),
+        confidence: 0.8,
+        sample_size: 20,
+      },
+    ];
+    const result = formatTeamStyleGuide(rules);
+    expect(result).toContain("examples:");
+    expect(result).toContain('"Add login page"');
+    expect(result).toContain('"Implement caching"');
+  });
+
+  it("skips empty examples and empty verbs arrays", () => {
+    const rules: TeamRule[] = [
+      {
+        category: "naming_convention",
+        rule_key: "examples/Story",
+        issue_type: "Story",
+        rule_value: "[]",
+        confidence: 0,
+        sample_size: 5,
+      },
+      {
+        category: "naming_convention",
+        rule_key: "first_verb/Story",
+        issue_type: "Story",
+        rule_value: "[]",
+        confidence: 0,
+        sample_size: 5,
+      },
+    ];
+    const result = formatTeamStyleGuide(rules);
+    expect(result).not.toContain("examples:");
+    expect(result).not.toContain("top verbs:");
+  });
+
+  it("formats story points mean rule", () => {
+    const rules: TeamRule[] = [
+      {
+        category: "story_points",
+        rule_key: "mean/Story",
+        issue_type: "Story",
+        rule_value: "4.5",
+        confidence: 0.7,
+        sample_size: 30,
+      },
+    ];
+    const result = formatTeamStyleGuide(rules);
+    expect(result).toContain("**Story**: mean 4.5");
+  });
+
+  it("formats label usage_rate rule", () => {
+    const rules: TeamRule[] = [
+      {
+        category: "label_patterns",
+        rule_key: "usage_rate",
+        issue_type: null,
+        rule_value: "80%",
+        confidence: 0.9,
+        sample_size: 40,
+      },
+    ];
+    const result = formatTeamStyleGuide(rules);
+    expect(result).toContain("80% of tickets have labels");
+  });
+
+  it("skips empty top_labels array", () => {
+    const rules: TeamRule[] = [
+      {
+        category: "label_patterns",
+        rule_key: "top_labels",
+        issue_type: null,
+        rule_value: "[]",
+        confidence: 0,
+        sample_size: 5,
+      },
+    ];
+    const result = formatTeamStyleGuide(rules);
+    expect(result).not.toContain("Top labels:");
+  });
+
+  it("formats component usage_rate and skips empty top_components", () => {
+    const rules: TeamRule[] = [
+      {
+        category: "component_patterns",
+        rule_key: "usage_rate",
+        issue_type: null,
+        rule_value: "60%",
+        confidence: 0.8,
+        sample_size: 30,
+      },
+      {
+        category: "component_patterns",
+        rule_key: "top_components",
+        issue_type: null,
+        rule_value: "[]",
+        confidence: 0,
+        sample_size: 5,
+      },
+    ];
+    const result = formatTeamStyleGuide(rules);
+    expect(result).toContain("60% of tickets have components");
+    expect(result).not.toContain("Top components:");
+  });
+
+  it("formats workflow bottleneck and avg_total_days", () => {
+    const rules: TeamRule[] = [
+      {
+        category: "workflow",
+        rule_key: "bottleneck",
+        issue_type: null,
+        rule_value: "In Review",
+        confidence: 0.7,
+        sample_size: 20,
+      },
+      {
+        category: "workflow",
+        rule_key: "avg_total_days",
+        issue_type: null,
+        rule_value: "5.2",
+        confidence: 0.8,
+        sample_size: 25,
+      },
+    ];
+    const result = formatTeamStyleGuide(rules);
+    expect(result).toContain("Bottleneck status: **In Review**");
+    expect(result).toContain("Avg lead time: 5.2 days");
+  });
+
+  it("formats sprint avg_points_per_ticket rule", () => {
+    const rules: TeamRule[] = [
+      {
+        category: "sprint_composition",
+        rule_key: "avg_points_per_ticket",
+        issue_type: null,
+        rule_value: "3.5",
+        confidence: 0.7,
+        sample_size: 20,
+      },
+    ];
+    const result = formatTeamStyleGuide(rules);
+    expect(result).toContain("Avg points per ticket: 3.5");
+  });
+
+  it("uses 'All' label when issue_type is null", () => {
+    const rules: TeamRule[] = [
+      {
+        category: "description_structure",
+        rule_key: "ac_format/All",
+        issue_type: null,
+        rule_value: "bullet",
+        confidence: 0.6,
+        sample_size: 15,
+      },
+    ];
+    const result = formatTeamStyleGuide(rules);
+    expect(result).toContain("**All**");
+  });
+
+  it("formats all seven sections with complete rules", () => {
+    const rules: TeamRule[] = [
+      {
+        category: "description_structure",
+        rule_key: "section_headings/Story",
+        issue_type: "Story",
+        rule_value: JSON.stringify(["context", "requirements"]),
+        confidence: 0.9,
+        sample_size: 30,
+      },
+      {
+        category: "naming_convention",
+        rule_key: "pattern/Story",
+        issue_type: "Story",
+        rule_value: "verb-first",
+        confidence: 0.8,
+        sample_size: 25,
+      },
+      {
+        category: "story_points",
+        rule_key: "range/Story",
+        issue_type: "Story",
+        rule_value: "3-8",
+        confidence: 0.7,
+        sample_size: 20,
+      },
+      {
+        category: "label_patterns",
+        rule_key: "top_labels",
+        issue_type: null,
+        rule_value: JSON.stringify([{ label: "frontend", percentage: "40%" }]),
+        confidence: 0.8,
+        sample_size: 30,
+      },
+      {
+        category: "component_patterns",
+        rule_key: "top_components",
+        issue_type: null,
+        rule_value: JSON.stringify([{ component: "api", percentage: "60%" }]),
+        confidence: 0.9,
+        sample_size: 35,
+      },
+      {
+        category: "workflow",
+        rule_key: "happy_path",
+        issue_type: null,
+        rule_value: JSON.stringify(["To Do", "In Progress", "Done"]),
+        confidence: 0.85,
+        sample_size: 40,
+      },
+      {
+        category: "sprint_composition",
+        rule_key: "type_mix",
+        issue_type: null,
+        rule_value: JSON.stringify({ Story: "60%", Bug: "40%" }),
+        confidence: 0.8,
+        sample_size: 25,
+      },
+    ];
+    const result = formatTeamStyleGuide(rules);
+    expect(result).toContain("### Description Structure");
+    expect(result).toContain("### Naming Conventions");
+    expect(result).toContain("### Story Points");
+    expect(result).toContain("### Labels");
+    expect(result).toContain("### Components");
+    expect(result).toContain("### Workflow");
+    expect(result).toContain("### Sprint Composition");
+    expect(result).toContain("Top labels: frontend (40%)");
+    expect(result).toContain("Top components: api (60%)");
+    expect(result).toContain("To Do");
+    expect(result).toContain("Story 60%");
+  });
+});
+
+// ─── Statistical helpers (team-rules-utils) ──────────────────────────────
+
+describe("statistical helpers", () => {
+  describe("median", () => {
+    it("returns 0 for empty array", () => {
+      expect(median([])).toBe(0);
+    });
+
+    it("returns middle value for odd-length array", () => {
+      expect(median([3, 1, 5])).toBe(3);
+    });
+
+    it("returns average of two middle values for even-length array", () => {
+      expect(median([1, 2, 3, 4])).toBe(2.5);
+    });
+
+    it("handles single element", () => {
+      expect(median([42])).toBe(42);
+    });
+  });
+
+  describe("percentile", () => {
+    it("returns 0 for empty array", () => {
+      expect(percentile([], 50)).toBe(0);
+    });
+
+    it("returns exact value when index falls on element", () => {
+      expect(percentile([1, 2, 3, 4, 5], 50)).toBe(3);
+    });
+
+    it("interpolates between values", () => {
+      const result = percentile([1, 2, 3, 4], 25);
+      expect(result).toBeGreaterThanOrEqual(1);
+      expect(result).toBeLessThanOrEqual(2);
+    });
+
+    it("returns first element for 0th percentile", () => {
+      expect(percentile([10, 20, 30], 0)).toBe(10);
+    });
+
+    it("returns last element for 100th percentile", () => {
+      expect(percentile([10, 20, 30], 100)).toBe(30);
+    });
+  });
+
+  describe("mean", () => {
+    it("returns 0 for empty array", () => {
+      expect(mean([])).toBe(0);
+    });
+
+    it("calculates correct average", () => {
+      expect(mean([2, 4, 6])).toBe(4);
+    });
+  });
+
+  describe("stddev", () => {
+    it("returns 0 for fewer than 2 elements", () => {
+      expect(stddev([])).toBe(0);
+      expect(stddev([5])).toBe(0);
+    });
+
+    it("returns 0 for identical values", () => {
+      expect(stddev([3, 3, 3])).toBe(0);
+    });
+
+    it("calculates standard deviation", () => {
+      const result = stddev([2, 4, 4, 4, 5, 5, 7, 9]);
+      expect(result).toBeGreaterThan(0);
+    });
+  });
+
+  describe("topN", () => {
+    it("returns top items sorted by count", () => {
+      const freq = new Map<string, number>([
+        ["a", 5],
+        ["b", 10],
+        ["c", 3],
+      ]);
+      const result = topN(freq, 2);
+      expect(result).toHaveLength(2);
+      expect(result[0]?.value).toBe("b");
+      expect(result[1]?.value).toBe("a");
+    });
+
+    it("handles empty map", () => {
+      expect(topN(new Map(), 5)).toEqual([]);
+    });
+  });
+
+  describe("pct", () => {
+    it("returns 0 when total is 0", () => {
+      expect(pct(5, 0)).toBe(0);
+    });
+
+    it("calculates percentage correctly", () => {
+      expect(pct(3, 4)).toBe(75);
+    });
+  });
+});
+
+// ─── buildQualityMap ────────────────────────────────────────────────────
+
+describe("buildQualityMap", () => {
+  it("returns map of ticket keys to quality scores", () => {
+    const tickets = [makeTicket({ key: "Q-1" }), makeMinimalTicket({ key: "Q-2" })];
+    const map = buildQualityMap(tickets);
+    expect(map.size).toBe(2);
+    expect(map.get("Q-1")).toBeGreaterThan(0);
+    expect(map.get("Q-2")).toBeDefined();
+    expect((map.get("Q-1") ?? 0) > (map.get("Q-2") ?? 0)).toBe(true);
+  });
+
+  it("returns empty map for no tickets", () => {
+    expect(buildQualityMap([]).size).toBe(0);
+  });
+});
+
+// ─── extractDescriptionRules — additional branches ──────────────────────
+
+describe("extractDescriptionRules — AC format variants", () => {
+  it("detects gherkin AC format", () => {
+    const tickets = Array.from({ length: 10 }, (_, i) =>
+      makeTicket({
+        key: `GHK-${i}`,
+        description: "Given the user is logged in\nWhen they click submit\nThen the form is saved",
+      }),
+    );
+    const rules = extractDescriptionRules(tickets);
+    const acRule = rules.find((r) => r.rule_key.startsWith("ac_format/"));
+    expect(acRule).toBeDefined();
+    expect(acRule?.rule_value).toBe("gherkin");
+  });
+
+  it("detects bullet AC format", () => {
+    const tickets = Array.from({ length: 10 }, (_, i) =>
+      makeTicket({
+        key: `BUL-${i}`,
+        description: "Requirements:\n- Must support login\n- Must validate email\n- Must show error",
+      }),
+    );
+    const rules = extractDescriptionRules(tickets);
+    const acRule = rules.find((r) => r.rule_key.startsWith("ac_format/"));
+    expect(acRule).toBeDefined();
+    expect(acRule?.rule_value).toBe("bullet");
+  });
+
+  it("detects none AC format when description has no structure", () => {
+    const tickets = Array.from({ length: 5 }, (_, i) =>
+      makeTicket({
+        key: `NONE-${i}`,
+        description: "Plain text description without any structured format.",
+      }),
+    );
+    const rules = extractDescriptionRules(tickets);
+    const acRule = rules.find((r) => r.rule_key.startsWith("ac_format/"));
+    expect(acRule).toBeDefined();
+    expect(acRule?.rule_value).toBe("none");
+  });
+
+  it("detects bold section headings as structure", () => {
+    const tickets = Array.from({ length: 10 }, (_, i) =>
+      makeTicket({
+        key: `BOLD-${i}`,
+        description: "**Context**\nBackground info\n\n**Requirements**\n- Item 1",
+      }),
+    );
+    const rules = extractDescriptionRules(tickets);
+    const structRule = rules.find((r) => r.rule_key.startsWith("has_structure_pct/"));
+    expect(structRule).toBeDefined();
+    expect(structRule?.rule_value).not.toBe("0%");
   });
 });

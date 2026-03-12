@@ -64,9 +64,12 @@ export function buildJiraClient(kb: KnowledgeBase): { jira: JiraClient; config: 
     );
   }
   const schema = JiraClient.loadSchemaFromDb(kb);
-  if (!schema) {
+  if (!schema || schema.projectKey !== projectKey) {
+    const reason = schema
+      ? `is for project ${schema.projectKey}, but current project is ${projectKey}`
+      : "not discovered";
     throw new Error(
-      "Jira schema not discovered. Run: configure action='setup' to initialize Jira schema and Confluence indexing.",
+      `Jira schema ${reason}. Run: configure action='setup' to initialize Jira schema and Confluence indexing.`,
     );
   }
   return { jira: new JiraClient({ ...config, jiraProjectKey: projectKey }, schema), config };

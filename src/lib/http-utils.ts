@@ -30,12 +30,21 @@ function backoffMs(attempt: number): number {
 }
 
 /** Determine whether a response should be retried and the delay to wait. */
+function parseRetryAfter(header: string): number {
+  const seconds = Number(header);
+  if (!Number.isNaN(seconds)) return seconds * 1000;
+  const date = Date.parse(header);
+  if (!Number.isNaN(date)) return Math.max(0, date - Date.now());
+  return 0;
+}
+
 function retryDelay(res: Response, attempt: number): number | null {
+  if (attempt >= MAX_RETRIES) return null;
   if (res.status === 429) {
     const retryAfter = res.headers.get("Retry-After");
-    return retryAfter ? Number.parseInt(retryAfter, 10) * 1000 : backoffMs(attempt);
+    return retryAfter ? parseRetryAfter(retryAfter) || backoffMs(attempt) : backoffMs(attempt);
   }
-  if (RETRYABLE_STATUSES.has(res.status) && attempt < MAX_RETRIES) {
+  if (RETRYABLE_STATUSES.has(res.status)) {
     return backoffMs(attempt);
   }
   return null;

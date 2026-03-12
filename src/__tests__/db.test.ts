@@ -753,6 +753,71 @@ describe("search with special FTS5 characters", () => {
   });
 });
 
+// ── ftsQuery fallback on FTS5 syntax errors ───────────────────────────────
+
+describe("ftsQuery fallback and edge cases", () => {
+  it("filters by both pageType and spaceKey", () => {
+    kb.upsertPage(makePage({ id: "1", page_type: "adr", space_key: "ENG", content: "alpha bravo content" }));
+    kb.upsertPage(makePage({ id: "2", page_type: "adr", space_key: "PM", content: "alpha bravo content" }));
+    kb.upsertPage(makePage({ id: "3", page_type: "design", space_key: "ENG", content: "alpha bravo content" }));
+
+    const results = kb.search("alpha", { pageType: "adr", spaceKey: "ENG" });
+    expect(results).toHaveLength(1);
+    expect(results[0]?.id).toBe("1");
+  });
+
+  it("filters chunks by both pageType and spaceKey", () => {
+    kb.upsertPage(makePage({ id: "p1", page_type: "adr", space_key: "ENG", content: "page" }));
+    kb.upsertPage(makePage({ id: "p2", page_type: "adr", space_key: "PM", content: "page" }));
+    kb.upsertPage(makePage({ id: "p3", page_type: "design", space_key: "ENG", content: "page" }));
+    kb.upsertChunks("p1", [{ breadcrumb: "", heading: "H", depth: 1, content: "zephyr unique content", index: 0 }]);
+    kb.upsertChunks("p2", [{ breadcrumb: "", heading: "H", depth: 1, content: "zephyr unique content", index: 0 }]);
+    kb.upsertChunks("p3", [{ breadcrumb: "", heading: "H", depth: 1, content: "zephyr unique content", index: 0 }]);
+
+    const results = kb.searchChunks("zephyr", { pageType: "adr", spaceKey: "ENG" });
+    expect(results).toHaveLength(1);
+    expect(results[0]?.space_key).toBe("ENG");
+    expect(results[0]?.page_type).toBe("adr");
+  });
+
+  it("returns empty for query of only special characters", () => {
+    kb.upsertPage(makePage({ id: "1", content: "test content" }));
+    expect(kb.search('*"()^+-')).toHaveLength(0);
+    expect(kb.searchChunks('*"()^+-')).toHaveLength(0);
+  });
+
+  it("returns empty for query of only FTS5 operators", () => {
+    kb.upsertPage(makePage({ id: "1", content: "test content" }));
+    expect(kb.search("AND OR NOT")).toHaveLength(0);
+  });
+
+  it("handles query with mixed special chars and valid words", () => {
+    kb.upsertPage(makePage({ id: "1", content: "deployment pipeline configuration" }));
+    const results = kb.search('"deployment" AND (pipeline)');
+    expect(results.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// ── sanitizeFtsQuery additional edge cases ────────────────────────────────
+
+describe("sanitizeFtsQuery edge cases", () => {
+  it("handles single word input", () => {
+    expect(sanitizeFtsQuery("hello")).toBe('"hello"');
+  });
+
+  it("handles consecutive spaces", () => {
+    expect(sanitizeFtsQuery("foo    bar")).toBe('"foo" "bar"');
+  });
+
+  it("handles mixed operators and special chars", () => {
+    expect(sanitizeFtsQuery('*NEAR(test AND "quoted") OR other+')).toBe('"test" "quoted" "other"');
+  });
+
+  it("handles tab and newline whitespace", () => {
+    expect(sanitizeFtsQuery("foo\tbar\nbaz")).toBe('"foo" "bar" "baz"');
+  });
+});
+
 // ── optimize + getDbSizeBytes ─────────────────────────────────────────────
 
 describe("optimize and getDbSizeBytes", () => {
