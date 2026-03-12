@@ -47,8 +47,8 @@ export class KnowledgeBase {
   private readonly stmts: PreparedStatements;
   private readonly searchStmts: SearchStatements;
 
-  constructor(dbPath?: string) {
-    const resolvedPath = dbPath || path.join(process.cwd(), ".lazy-backlog", "knowledge.db");
+  constructor(dbPath: string) {
+    const resolvedPath = dbPath;
     this.dbPath = resolvedPath;
     const dir = path.dirname(resolvedPath);
     if (!fs.existsSync(dir)) {
