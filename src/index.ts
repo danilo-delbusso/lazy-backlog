@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { KnowledgeBase } from "./lib/db.js";
@@ -16,7 +17,7 @@ const server = new McpServer({ name: "lazy-backlog", version: pkg.version }, { c
 // Lazy-init knowledge base
 let kb: KnowledgeBase | null = null;
 function getKb(): KnowledgeBase {
-  kb ??= new KnowledgeBase();
+  kb ??= new KnowledgeBase(process.env.LAZY_BACKLOG_DB_PATH || join(process.cwd(), ".lazy-backlog", "knowledge.db"));
   return kb;
 }
 
