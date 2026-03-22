@@ -7,8 +7,8 @@ import { formatTeamInsights } from "../lib/team-insights.js";
 import { handlePlanAction } from "./insights-plan.js";
 import { loadTeamInsights } from "./issues-helpers.js";
 import { handleRetroAction } from "./sprints-retro.js";
-import { buildSuggestions } from "./suggestions.js";
 import { fetchSprintData } from "./sprints-utils.js";
+import { buildSuggestions } from "./suggestions.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 

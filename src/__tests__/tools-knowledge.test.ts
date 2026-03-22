@@ -496,5 +496,4 @@ describe("registerKnowledgeTool", () => {
       expect(result.isError).toBe(true);
     });
   });
-
 });

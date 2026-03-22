@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { KnowledgeBase } from "../lib/db.js";
-import { JiraClient, type JiraSchema } from "../lib/jira.js";
+import { JiraClient, type JiraSchema, type SearchIssue } from "../lib/jira.js";
 import { registerInsightsTool } from "../tools/insights.js";
 import { createMockServer } from "./helpers/mock-server.js";
 
@@ -11,12 +11,6 @@ import { createMockServer } from "./helpers/mock-server.js";
 
 const originalFetch = globalThis.fetch;
 let fetchMock: Mock;
-
-function mockFetchResponse(body: unknown, status = 200) {
-  fetchMock.mockResolvedValueOnce(
-    new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } }),
-  );
-}
 
 beforeAll(() => {
   fetchMock = vi.fn(() => Promise.resolve(new Response("{}")));
@@ -74,10 +68,10 @@ function makeSprintIssues(statuses: string[], points: (number | undefined)[], op
       issuetype: { name: options?.issueTypes?.[idx] ?? "Task" },
       status: { name: status },
       priority: { name: "Medium" },
-      assignee: null,
+      assignee: undefined,
       story_points: points[idx],
     },
-  }));
+  })) as unknown as SearchIssue[];
 }
 
 function getText(result: { content: { type: string; text: string }[] }): string {
@@ -311,81 +305,78 @@ describe("registerInsightsTool", () => {
       const { server, getTool } = createMockServer();
       registerInsightsTool(server, () => kb);
 
-      vi.spyOn(JiraClient.prototype, "listSprints" as never).mockImplementation(
-        ((_boardId: string, state?: string) => {
-          if (state === "closed") return Promise.resolve([
+      vi.spyOn(JiraClient.prototype, "listSprints").mockImplementation((_boardId: string, state?: string) => {
+        if (state === "closed")
+          return Promise.resolve([
             { id: 5, name: "Sprint 5", state: "closed" },
             { id: 6, name: "Sprint 6", state: "closed" },
           ]);
-          return Promise.resolve([]);
-        }) as never,
-      );
+        return Promise.resolve([]);
+      });
 
-      vi.spyOn(JiraClient.prototype, "getSprint" as never).mockImplementation(
-        ((_sprintId: string) => Promise.resolve({
+      vi.spyOn(JiraClient.prototype, "getSprint").mockImplementation((_sprintId: string) =>
+        Promise.resolve({
           id: 6,
           name: "Sprint 6",
           state: "closed",
           startDate: "2026-02-15T00:00:00Z",
           endDate: "2026-02-28T00:00:00Z",
           goal: "Finish auth",
-        })) as never,
+        }),
       );
 
-      vi.spyOn(JiraClient.prototype, "getSprintIssues" as never).mockImplementation(
-        ((sprintId: string) => {
-          if (sprintId === "6") {
-            return Promise.resolve({
-              issues: [
-                {
-                  key: "BP-10",
-                  fields: {
-                    summary: "Done task",
-                    status: { name: "Done" },
-                    issuetype: { name: "Task" },
-                    priority: { name: "High" },
-                    assignee: null,
-                    story_points: 5,
-                  },
-                },
-                {
-                  key: "BP-11",
-                  fields: {
-                    summary: "Carried task",
-                    status: { name: "In Progress" },
-                    issuetype: { name: "Bug" },
-                    priority: { name: "Medium" },
-                    assignee: null,
-                    story_points: 3,
-                  },
-                },
-              ],
-              total: 2,
-            });
-          }
-          // Sprint 5 issues for velocity
+      vi.spyOn(JiraClient.prototype, "getSprintIssues").mockImplementation(((sprintId: string) => {
+        if (sprintId === "6") {
           return Promise.resolve({
-            issues: makeSprintIssues(["Done", "Done"], [5, 3]),
+            issues: [
+              {
+                key: "BP-10",
+                id: "10",
+                fields: {
+                  summary: "Done task",
+                  status: { name: "Done" },
+                  issuetype: { name: "Task" },
+                  priority: { name: "High" },
+                  story_points: 5,
+                },
+              },
+              {
+                key: "BP-11",
+                id: "11",
+                fields: {
+                  summary: "Carried task",
+                  status: { name: "In Progress" },
+                  issuetype: { name: "Bug" },
+                  priority: { name: "Medium" },
+                  story_points: 3,
+                },
+              },
+            ] as unknown as SearchIssue[],
             total: 2,
           });
-        }) as never,
-      );
+        }
+        // Sprint 5 issues for velocity
+        return Promise.resolve({
+          issues: makeSprintIssues(["Done", "Done"], [5, 3]),
+          total: 2,
+        });
+      }) as typeof JiraClient.prototype.getSprintIssues);
 
-      vi.spyOn(JiraClient.prototype, "getIssueChangelog" as never).mockImplementation(
-        ((_issueKey: string) => Promise.resolve([
+      vi.spyOn(JiraClient.prototype, "getIssueChangelog").mockImplementation((_issueKey: string) =>
+        Promise.resolve([
           {
             id: "1",
             created: "2026-02-16T10:00:00Z",
-            author: { displayName: "dev" },
+            author: { displayName: "dev", accountId: "dev-1" },
             items: [{ field: "status", fromString: "To Do", toString: "In Progress" }],
           },
           {
             id: "2",
             created: "2026-02-19T10:00:00Z",
-            author: { displayName: "dev" },
+            author: { displayName: "dev", accountId: "dev-1" },
             items: [{ field: "status", fromString: "In Progress", toString: "Done" }],
           },
-        ])) as never,
+        ]),
       );
 
       const insights = getTool("insights");
@@ -409,74 +400,66 @@ describe("registerInsightsTool", () => {
       const { server, getTool } = createMockServer();
       registerInsightsTool(server, () => kb);
 
-      vi.spyOn(JiraClient.prototype, "listSprints" as never).mockImplementation(
-        ((_boardId: string, state?: string) => {
-          if (state === "closed") return Promise.resolve([
-            { id: 10, name: "Sprint 10", state: "closed" },
-          ]);
-          return Promise.resolve([]);
-        }) as never,
-      );
+      vi.spyOn(JiraClient.prototype, "listSprints").mockImplementation((_boardId: string, state?: string) => {
+        if (state === "closed") return Promise.resolve([{ id: 10, name: "Sprint 10", state: "closed" }]);
+        return Promise.resolve([]);
+      });
 
-      vi.spyOn(JiraClient.prototype, "getSprint" as never).mockImplementation(
-        ((_sprintId: string) => Promise.resolve({
+      vi.spyOn(JiraClient.prototype, "getSprint").mockImplementation((_sprintId: string) =>
+        Promise.resolve({
           id: 10,
           name: "Sprint 10",
           state: "closed",
           startDate: "2026-02-01T00:00:00Z",
           endDate: "2026-02-14T00:00:00Z",
-        })) as never,
+        }),
       );
 
-      vi.spyOn(JiraClient.prototype, "getSprintIssues" as never).mockImplementation(
-        ((sprintId: string) => {
-          if (sprintId === "10") {
-            return Promise.resolve({
-              issues: [
-                {
-                  key: "BP-1",
-                  fields: {
-                    summary: "Done item",
-                    status: { name: "Done" },
-                    issuetype: { name: "Task" },
-                    priority: { name: "High" },
-                    assignee: null,
-                    story_points: 3,
-                  },
+      vi.spyOn(JiraClient.prototype, "getSprintIssues").mockImplementation(((sprintId: string) => {
+        if (sprintId === "10") {
+          return Promise.resolve({
+            issues: [
+              {
+                key: "BP-1",
+                id: "1",
+                fields: {
+                  summary: "Done item",
+                  status: { name: "Done" },
+                  issuetype: { name: "Task" },
+                  priority: { name: "High" },
+                  story_points: 3,
                 },
-                {
-                  key: "BP-2",
-                  fields: {
-                    summary: "Still in progress",
-                    status: { name: "In Progress" },
-                    issuetype: { name: "Task" },
-                    priority: { name: "Medium" },
-                    assignee: null,
-                    story_points: 5,
-                  },
+              },
+              {
+                key: "BP-2",
+                id: "2",
+                fields: {
+                  summary: "Still in progress",
+                  status: { name: "In Progress" },
+                  issuetype: { name: "Task" },
+                  priority: { name: "Medium" },
+                  story_points: 5,
                 },
-                {
-                  key: "BP-3",
-                  fields: {
-                    summary: "Bug not started",
-                    status: { name: "To Do" },
-                    issuetype: { name: "Bug" },
-                    priority: { name: "Low" },
-                    assignee: null,
-                    story_points: 2,
-                  },
+              },
+              {
+                key: "BP-3",
+                id: "3",
+                fields: {
+                  summary: "Bug not started",
+                  status: { name: "To Do" },
+                  issuetype: { name: "Bug" },
+                  priority: { name: "Low" },
+                  story_points: 2,
                 },
-              ],
-              total: 3,
-            });
-          }
-          return Promise.resolve({ issues: makeSprintIssues(["Done", "Done"], [5, 3]), total: 2 });
-        }) as never,
-      );
+              },
+            ] as unknown as SearchIssue[],
+            total: 3,
+          });
+        }
+        return Promise.resolve({ issues: makeSprintIssues(["Done", "Done"], [5, 3]), total: 2 });
+      }) as typeof JiraClient.prototype.getSprintIssues);
 
-      vi.spyOn(JiraClient.prototype, "getIssueChangelog" as never).mockImplementation(
-        (() => Promise.resolve([])) as never,
-      );
+      vi.spyOn(JiraClient.prototype, "getIssueChangelog").mockImplementation(() => Promise.resolve([]));
 
       const insights = getTool("insights");
       const result = await insights({ action: "retro" });
@@ -494,9 +477,7 @@ describe("registerInsightsTool", () => {
       const { server, getTool } = createMockServer();
       registerInsightsTool(server, () => kb);
 
-      vi.spyOn(JiraClient.prototype, "listSprints" as never).mockImplementation(
-        (() => Promise.resolve([])) as never,
-      );
+      vi.spyOn(JiraClient.prototype, "listSprints").mockImplementation(() => Promise.resolve([]));
 
       const insights = getTool("insights");
       const result = await insights({ action: "retro" });
@@ -508,27 +489,27 @@ describe("registerInsightsTool", () => {
       const { server, getTool } = createMockServer();
       registerInsightsTool(server, () => kb);
 
-      vi.spyOn(JiraClient.prototype, "getSprint" as never).mockImplementation(
-        ((_sprintId: string) => Promise.resolve({
+      vi.spyOn(JiraClient.prototype, "getSprint").mockImplementation((_sprintId: string) =>
+        Promise.resolve({
           id: 15,
           name: "Sprint 15",
           state: "closed",
           startDate: "2026-02-01T00:00:00Z",
           endDate: "2026-02-14T00:00:00Z",
-        })) as never,
+        }),
       );
 
-      vi.spyOn(JiraClient.prototype, "getSprintIssues" as never).mockImplementation(
-        ((_sprintId: string) => Promise.resolve({
+      vi.spyOn(JiraClient.prototype, "getSprintIssues").mockImplementation(((_sprintId: string) =>
+        Promise.resolve({
           issues: [
             {
               key: "BP-20",
+              id: "20",
               fields: {
                 summary: "Planned task",
                 status: { name: "Done" },
                 issuetype: { name: "Task" },
                 priority: { name: "High" },
-                assignee: null,
                 story_points: 3,
                 created: "2026-01-25T10:00:00Z",
                 updated: "2026-02-10T10:00:00Z",
@@ -536,12 +517,12 @@ describe("registerInsightsTool", () => {
             },
             {
               key: "BP-21",
+              id: "21",
               fields: {
                 summary: "Added mid-sprint",
                 status: { name: "Done" },
                 issuetype: { name: "Bug" },
                 priority: { name: "Medium" },
-                assignee: null,
                 story_points: 2,
                 created: "2026-02-05T10:00:00Z",
                 updated: "2026-02-12T10:00:00Z",
@@ -549,63 +530,58 @@ describe("registerInsightsTool", () => {
             },
             {
               key: "BP-22",
+              id: "22",
               fields: {
                 summary: "Also added mid-sprint",
                 status: { name: "In Progress" },
                 issuetype: { name: "Task" },
                 priority: { name: "Low" },
-                assignee: null,
                 story_points: 1,
                 created: "2026-02-08T10:00:00Z",
                 updated: "2026-02-13T10:00:00Z",
               },
             },
-          ],
+          ] as unknown as SearchIssue[],
           total: 3,
-        })) as never,
-      );
+        })) as typeof JiraClient.prototype.getSprintIssues);
 
-      vi.spyOn(JiraClient.prototype, "listSprints" as never).mockImplementation(
-        (() => Promise.resolve([])) as never,
-      );
+      vi.spyOn(JiraClient.prototype, "listSprints").mockImplementation(() => Promise.resolve([]));
 
-      vi.spyOn(JiraClient.prototype, "getIssueChangelog" as never).mockImplementation(
-        ((issueKey: string) => {
-          if (issueKey === "BP-20") {
-            return Promise.resolve([
-              {
-                id: "1",
-                created: "2026-02-02T10:00:00Z",
-                author: { displayName: "dev" },
-                items: [{ field: "status", fromString: "To Do", toString: "In Progress" }],
-              },
-              {
-                id: "2",
-                created: "2026-02-10T10:00:00Z",
-                author: { displayName: "dev" },
-                items: [{ field: "status", fromString: "In Progress", toString: "Done" }],
-              },
-            ]);
-          }
-          if (issueKey === "BP-21") {
-            return Promise.resolve([
-              {
-                id: "3",
-                created: "2026-02-05T12:00:00Z",
-                author: { displayName: "dev" },
-                items: [{ field: "status", fromString: "To Do", toString: "In Progress" }],
-              },
-              {
-                id: "4",
-                created: "2026-02-12T10:00:00Z",
-                author: { displayName: "dev" },
-                items: [{ field: "status", fromString: "In Progress", toString: "Done" }],
-              },
-            ]);
-          }
-          return Promise.resolve([]);
-        }) as never,
-      );
+      vi.spyOn(JiraClient.prototype, "getIssueChangelog").mockImplementation((issueKey: string) => {
+        if (issueKey === "BP-20") {
+          return Promise.resolve([
+            {
+              id: "1",
+              created: "2026-02-02T10:00:00Z",
+              author: { displayName: "dev", accountId: "dev-1" },
+              items: [{ field: "status", fromString: "To Do", toString: "In Progress" }],
+            },
+            {
+              id: "2",
+              created: "2026-02-10T10:00:00Z",
+              author: { displayName: "dev", accountId: "dev-1" },
+              items: [{ field: "status", fromString: "In Progress", toString: "Done" }],
+            },
+          ]);
+        }
+        if (issueKey === "BP-21") {
+          return Promise.resolve([
+            {
+              id: "3",
+              created: "2026-02-05T12:00:00Z",
+              author: { displayName: "dev", accountId: "dev-1" },
+              items: [{ field: "status", fromString: "To Do", toString: "In Progress" }],
+            },
+            {
+              id: "4",
+              created: "2026-02-12T10:00:00Z",
+              author: { displayName: "dev", accountId: "dev-1" },
+              items: [{ field: "status", fromString: "In Progress", toString: "Done" }],
+            },
+          ]);
+        }
+        return Promise.resolve([]);
+      });
 
       const insights = getTool("insights");
       const result = await insights({ action: "retro", sprintId: "15" });
@@ -622,27 +598,27 @@ describe("registerInsightsTool", () => {
       const { server, getTool } = createMockServer();
       registerInsightsTool(server, () => kb);
 
-      vi.spyOn(JiraClient.prototype, "getSprint" as never).mockImplementation(
-        ((_sprintId: string) => Promise.resolve({
+      vi.spyOn(JiraClient.prototype, "getSprint").mockImplementation((_sprintId: string) =>
+        Promise.resolve({
           id: 16,
           name: "Sprint 16",
           state: "closed",
           startDate: "2026-02-15T00:00:00Z",
           endDate: "2026-02-28T00:00:00Z",
-        })) as never,
+        }),
       );
 
-      vi.spyOn(JiraClient.prototype, "getSprintIssues" as never).mockImplementation(
-        ((_sprintId: string) => Promise.resolve({
+      vi.spyOn(JiraClient.prototype, "getSprintIssues").mockImplementation(((_sprintId: string) =>
+        Promise.resolve({
           issues: [
             {
               key: "BP-30",
+              id: "30",
               fields: {
                 summary: "Story A",
                 status: { name: "Done" },
                 issuetype: { name: "Story" },
                 priority: { name: "High" },
-                assignee: null,
                 story_points: 5,
                 created: "2026-02-15T10:00:00Z",
                 updated: "2026-02-20T10:00:00Z",
@@ -650,12 +626,12 @@ describe("registerInsightsTool", () => {
             },
             {
               key: "BP-31",
+              id: "31",
               fields: {
                 summary: "Bug B",
                 status: { name: "Done" },
                 issuetype: { name: "Bug" },
                 priority: { name: "Medium" },
-                assignee: null,
                 story_points: 2,
                 created: "2026-02-16T10:00:00Z",
                 updated: "2026-02-18T10:00:00Z",
@@ -663,29 +639,24 @@ describe("registerInsightsTool", () => {
             },
             {
               key: "BP-32",
+              id: "32",
               fields: {
                 summary: "Story C",
                 status: { name: "Done" },
                 issuetype: { name: "Story" },
                 priority: { name: "Low" },
-                assignee: null,
                 story_points: 3,
                 created: "2026-02-15T10:00:00Z",
                 updated: "2026-02-25T10:00:00Z",
               },
             },
-          ],
+          ] as unknown as SearchIssue[],
           total: 3,
-        })) as never,
-      );
+        })) as typeof JiraClient.prototype.getSprintIssues);
 
-      vi.spyOn(JiraClient.prototype, "listSprints" as never).mockImplementation(
-        (() => Promise.resolve([])) as never,
-      );
+      vi.spyOn(JiraClient.prototype, "listSprints").mockImplementation(() => Promise.resolve([]));
 
-      vi.spyOn(JiraClient.prototype, "getIssueChangelog" as never).mockImplementation(
-        (() => Promise.resolve([])) as never,
-      );
+      vi.spyOn(JiraClient.prototype, "getIssueChangelog").mockImplementation(() => Promise.resolve([]));
 
       const insights = getTool("insights");
       const result = await insights({ action: "retro", sprintId: "16" });

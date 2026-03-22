@@ -474,7 +474,6 @@ describe("registerBugsTool", () => {
       addCommentSpy.mockRestore();
     });
   });
-
 });
 
 // ── inferSeverity (unit tests) ────────────────────────────────────────────

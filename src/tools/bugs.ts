@@ -101,9 +101,7 @@ export function registerBugsTool(server: McpServer, getKb: () => KnowledgeBase) 
         "Bug triage — the complete bug intelligence pipeline. Fetches issues, scores completeness, infers severity, recommends sprint placement, evaluates team conventions, and warns about high-rework components. Use the 'issues' tool for general get/search/update operations.",
       inputSchema: z.object({
         action: z.literal("triage"),
-        issueKeys: z
-          .array(z.string())
-          .describe("Issue keys to triage, e.g. ['BP-1','BP-2']"),
+        issueKeys: z.array(z.string()).describe("Issue keys to triage, e.g. ['BP-1','BP-2']"),
         autoUpdate: z
           .boolean()
           .default(false)

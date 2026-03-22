@@ -1,5 +1,4 @@
 import { errorResponse, textResponse } from "../lib/config.js";
-import { buildSuggestions } from "./suggestions.js";
 import { groupBy } from "../lib/db.js";
 import type { ChangelogEntry, JiraClient, JiraSprint, SearchIssue } from "../lib/jira.js";
 import {
@@ -24,6 +23,7 @@ import {
   parseSinceParam,
   type StandupChange,
 } from "./sprints-utils.js";
+import { buildSuggestions } from "./suggestions.js";
 
 /* ------------------------------------------------------------------ */
 /*  Active sprint — Full Dashboard                                     */
@@ -280,7 +280,12 @@ export async function handleSmartGetAction(
       return errorResponse(err instanceof Error ? err.message : String(err));
     }
     const out = await buildStandupDigest(sprint, issues, sinceDate, jira);
-    const suggestions = buildSuggestions("sprints", "get", { blockerCount: 0, healthScore: 100, carryoverCount: 0, isClosedSprint: false });
+    const suggestions = buildSuggestions("sprints", "get", {
+      blockerCount: 0,
+      healthScore: 100,
+      carryoverCount: 0,
+      isClosedSprint: false,
+    });
     return textResponse(out + suggestions);
   }
 
@@ -294,6 +299,11 @@ export async function handleSmartGetAction(
     const s = (i.fields.status?.name ?? "").toLowerCase();
     return s !== "done" && s !== "closed" && s !== "resolved";
   }).length;
-  const suggestions = buildSuggestions("sprints", "get", { blockerCount, healthScore, carryoverCount, isClosedSprint: false });
+  const suggestions = buildSuggestions("sprints", "get", {
+    blockerCount,
+    healthScore,
+    carryoverCount,
+    isClosedSprint: false,
+  });
   return textResponse(out + suggestions);
 }

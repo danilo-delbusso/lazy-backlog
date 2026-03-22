@@ -476,5 +476,4 @@ describe("registerBacklogTool", () => {
       backlogSpy.mockRestore();
     });
   });
-
 });
