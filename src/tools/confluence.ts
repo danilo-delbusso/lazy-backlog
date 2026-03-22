@@ -66,6 +66,21 @@ async function handleSpider(
     lines.push("FTS index rebuilt.");
   }
 
+  // Indexing quality report
+  if (result.indexed > 0 && stats.total > 0) {
+    const typeEntries = Object.entries(stats.byType);
+    const otherCount = stats.byType.other ?? 0;
+    const typeSummary = typeEntries
+      .filter(([k]) => k !== "other")
+      .map(([k, v]) => `${v} ${k}s`)
+      .join(", ");
+    const qualityParts = [typeSummary];
+    if (otherCount > 0) {
+      qualityParts.push(`${otherCount} classified 'other' — consider reviewing classification`);
+    }
+    lines.push(`\n**Quality:** ${qualityParts.join(". ")}.`);
+  }
+
   return textResponse(lines.join("\n"));
 }
 

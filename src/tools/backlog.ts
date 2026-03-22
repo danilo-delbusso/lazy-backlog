@@ -1,10 +1,12 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { adfToText } from "../lib/adf.js";
+import { computeVelocity } from "../lib/analytics.js";
 import { buildJiraClient, errorResponse, textResponse } from "../lib/config.js";
 import type { KnowledgeBase } from "../lib/db.js";
 import { jaccardSimilarity, tokenize } from "../lib/duplicate-detect.js";
 import type { JiraClient, SearchIssue } from "../lib/jira.js";
+import { fetchSprintData } from "./sprints-utils.js";
 import { buildSuggestions } from "./suggestions.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -176,6 +178,22 @@ async function handleList(params: { maxResults?: number }, kb: KnowledgeBase): P
       out += detectDuplicates(result.issues);
     }
 
+    // Aging analysis
+    const now = Date.now();
+    const buckets = { fresh: 0, recent: 0, aging: 0, stale: 0 };
+    for (const issue of result.issues) {
+      const created = issue.fields.created ? new Date(issue.fields.created).getTime() : now;
+      const days = (now - created) / 86_400_000;
+      if (days < 7) buckets.fresh++;
+      else if (days < 30) buckets.recent++;
+      else if (days < 90) buckets.aging++;
+      else buckets.stale++;
+    }
+    out += `\n**Aging:** <7d: ${buckets.fresh} | 7-30d: ${buckets.recent} | 30-90d: ${buckets.aging} | >90d: ${buckets.stale}`;
+    if (buckets.stale > 0) {
+      out += `\n${buckets.stale} item${buckets.stale > 1 ? "s have" : " has"} been in backlog >90 days — consider closing or reprioritizing.`;
+    }
+
     const orphanedCount = result.issues.filter((i) => !(i.fields as Record<string, unknown>).parent).length;
     const unestimatedCount = result.issues.filter((i) => {
       const f = i.fields as Record<string, unknown>;
@@ -262,8 +280,34 @@ async function handleRank(
       ...(rankAfter ? { rankAfter } : {}),
     });
 
+    // Rank impact preview: show context about the moved item
+    let context = "";
+    try {
+      const detail = await jira.getIssue(params.issueKey);
+      const sp = detail.storyPoints;
+      const assignee = detail.assignee ?? "Unassigned";
+      context = ` (${detail.issueType}, ${sp != null ? `${sp} SP, ` : ""}${detail.priority} priority, assigned to ${assignee})`;
+
+      // Try velocity % if board configured and story points available
+      if (sp != null && config.jiraBoardId) {
+        try {
+          const sprintData = await fetchSprintData(jira, config.jiraBoardId, 5);
+          if (sprintData.length > 0) {
+            const velocity = computeVelocity(sprintData);
+            if (velocity.average > 0) {
+              context += `. If pulled into next sprint: ${Math.round((sp / velocity.average) * 100)}% of velocity (avg ${Math.round(velocity.average)} SP)`;
+            }
+          }
+        } catch {
+          /* velocity unavailable — skip */
+        }
+      }
+    } catch {
+      /* issue detail unavailable — skip */
+    }
+
     return textResponse(
-      `Ranked **${params.issueKey}** ${describeRankDirection({ ...params, rankBefore, rankAfter })}.`,
+      `Ranked **${params.issueKey}** ${describeRankDirection({ ...params, rankBefore, rankAfter })}.${context}`,
     );
   } catch (err: unknown) {
     return errorResponse(`Failed to rank ${params.issueKey}: ${err instanceof Error ? err.message : String(err)}`);

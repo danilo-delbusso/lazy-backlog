@@ -217,9 +217,33 @@ export async function learnTeamConventions(
     analyzed_at: new Date().toISOString(),
   });
 
-  return (
-    "## Team Conventions\n" +
-    `Analyzed ${result.totalTickets} tickets → ${result.rules.length} rules + ${insightRecords.length} insights extracted\n` +
-    `Quality: ${result.qualityPassed}/${result.totalTickets} passed (avg score: ${result.avgQualityScore.toFixed(1)}/100)\n`
-  );
+  // Build data quality report
+  const passRate = result.totalTickets > 0 ? Math.round((result.qualityPassed / result.totalTickets) * 100) : 0;
+  const lines = [
+    "## Team Conventions\n",
+    `Analyzed ${result.totalTickets} tickets → ${result.rules.length} rules + ${insightRecords.length} insights extracted`,
+    `Quality: ${result.qualityPassed}/${result.totalTickets} passed (avg score: ${result.avgQualityScore.toFixed(1)}/100)\n`,
+    `**Data Quality Report:** ${passRate}% scored ≥${qualityThreshold} (threshold). Average score: ${Math.round(result.avgQualityScore)}/100.`,
+  ];
+
+  // Identify weak areas: categories with few or low-confidence rules
+  const allCategories = [
+    "description_structure", "naming_convention", "story_points",
+    "label_patterns", "component_patterns", "workflow", "sprint_composition",
+  ];
+  const weaknesses: string[] = [];
+  for (const cat of allCategories) {
+    const catRules = result.rules.filter((r) => r.category === cat);
+    if (catRules.length === 0) {
+      weaknesses.push(`no ${cat.replace(/_/g, " ")} patterns found`);
+    } else {
+      const avgConf = catRules.reduce((s, r) => s + r.confidence, 0) / catRules.length;
+      if (avgConf < 0.5) weaknesses.push(`weak ${cat.replace(/_/g, " ")} (${Math.round(avgConf * 100)}% confidence)`);
+    }
+  }
+  if (weaknesses.length > 0) {
+    lines.push(`Top weaknesses: ${weaknesses.slice(0, 3).join(", ")}.`);
+  }
+
+  return lines.join("\n");
 }
