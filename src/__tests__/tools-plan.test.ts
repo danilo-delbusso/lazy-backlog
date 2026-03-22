@@ -99,7 +99,7 @@ describe("registerIssuesTool (plan actions)", () => {
     restoreEnv();
   });
 
-  it("registers issues tool with create and decompose actions", () => {
+  it("registers issues tool with consolidated actions", () => {
     const { server, toolNames } = createMockServer();
     registerIssuesTool(server, () => kb);
     expect(toolNames()).toContain("issues");
@@ -139,7 +139,7 @@ describe("registerIssuesTool (plan actions)", () => {
     });
   });
 
-  describe("action=decompose", () => {
+  describe("action=create (decompose via epicKey)", () => {
     it("fetches epic details and existing children", async () => {
       const { server, getTool } = createMockServer();
       registerIssuesTool(server, () => kb);
@@ -185,7 +185,7 @@ describe("registerIssuesTool (plan actions)", () => {
       });
 
       const plan = getTool("issues");
-      const result = await plan({ action: "decompose", epicKey: "BP-50" });
+      const result = await plan({ action: "create", epicKey: "BP-50" });
       const text = result.content[0]?.text;
       expect(text).toContain("Epic Decomposition: BP-50");
       expect(text).toContain("User Authentication");
@@ -208,7 +208,7 @@ describe("registerIssuesTool (plan actions)", () => {
       );
 
       const plan = getTool("issues");
-      const result = await plan({ action: "decompose", epicKey: "BP-999" });
+      const result = await plan({ action: "create", epicKey: "BP-999" });
       expect(result.isError).toBe(true);
       expect(result.content[0]?.text).toContain("Failed to decompose BP-999");
     });
