@@ -169,7 +169,8 @@ function handleGet(kb: KnowledgeBase): ToolResponse {
   } else if (teamRules.length === 0) {
     setupSummary = "**Setup Status:** Team rules not yet configured. Run `configure setup` to learn team patterns.";
   } else if (stats.total === 0) {
-    setupSummary = "**Setup Status:** Team rules available but KB is empty. Run `confluence spider` to index documentation.";
+    setupSummary =
+      "**Setup Status:** Team rules available but KB is empty. Run `confluence spider` to index documentation.";
   }
 
   lines.push(

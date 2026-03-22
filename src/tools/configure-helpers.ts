@@ -228,8 +228,13 @@ export async function learnTeamConventions(
 
   // Identify weak areas: categories with few or low-confidence rules
   const allCategories = [
-    "description_structure", "naming_convention", "story_points",
-    "label_patterns", "component_patterns", "workflow", "sprint_composition",
+    "description_structure",
+    "naming_convention",
+    "story_points",
+    "label_patterns",
+    "component_patterns",
+    "workflow",
+    "sprint_composition",
   ];
   const weaknesses: string[] = [];
   for (const cat of allCategories) {
