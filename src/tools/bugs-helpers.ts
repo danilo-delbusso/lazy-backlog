@@ -84,7 +84,7 @@ function formatCompleteness(score: number, missing: string[]): string {
   } else {
     out += "**Status:** Complete\n";
   }
-  return out + "\n";
+  return `${out}\n`;
 }
 
 // ── Single-issue triage ─────────────────────────────────────────────────────
@@ -204,7 +204,7 @@ async function assignCriticalSprint(
     out += "\n*Issue moved to sprint + comment added.*\n";
   }
 
-  return out + "\n";
+  return `${out}\n`;
 }
 
 async function assignHighSprint(
@@ -226,7 +226,7 @@ async function assignHighSprint(
     out += "\n*Issue moved to sprint + comment added.*\n";
   }
 
-  return out + "\n";
+  return `${out}\n`;
 }
 
 async function assignLowSprint(
@@ -248,7 +248,7 @@ async function assignLowSprint(
     out += "\n*Issue moved to sprint + comment added.*\n";
   }
 
-  return out + "\n";
+  return `${out}\n`;
 }
 
 // ── Multi-issue triage report ───────────────────────────────────────────────
