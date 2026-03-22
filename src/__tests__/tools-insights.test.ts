@@ -667,4 +667,289 @@ describe("registerInsightsTool", () => {
       expect(text).toContain("Avg Cycle Time");
     });
   });
+
+  // ── action=plan ───────────────────────────────────────────────────────
+
+  describe("action=plan", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    /** Helper: mock closed sprints for velocity calculation. */
+    function mockClosedSprints(sprintCount: number) {
+      const closedSprints = Array.from({ length: sprintCount }, (_, i) => ({
+        id: 100 + i,
+        name: `Sprint ${100 + i}`,
+        state: "closed" as const,
+      }));
+
+      vi.spyOn(JiraClient.prototype, "listSprints").mockImplementation((_boardId: string, state?: string) => {
+        if (state === "closed") return Promise.resolve(closedSprints);
+        if (state === "active") return Promise.resolve([]);
+        return Promise.resolve([]);
+      });
+
+      // Each closed sprint had 10 SP done
+      vi.spyOn(JiraClient.prototype, "getSprintIssues").mockImplementation(((_sprintId: string) =>
+        Promise.resolve({
+          issues: makeSprintIssues(["Done", "Done"], [5, 5]),
+          total: 2,
+        })) as typeof JiraClient.prototype.getSprintIssues);
+    }
+
+    it("returns full plan with velocity, carryover, capacity, and recommended items", async () => {
+      const { server, getTool } = createMockServer();
+      registerInsightsTool(server, () => kb);
+
+      // 3 closed sprints for velocity (10 SP each → avg=10)
+      const closedSprints = [
+        { id: 100, name: "Sprint 100", state: "closed" as const },
+        { id: 101, name: "Sprint 101", state: "closed" as const },
+        { id: 102, name: "Sprint 102", state: "closed" as const },
+      ];
+      const activeSprint = { id: 200, name: "Sprint 200", state: "active" as const };
+
+      vi.spyOn(JiraClient.prototype, "listSprints").mockImplementation((_boardId: string, state?: string) => {
+        if (state === "closed") return Promise.resolve(closedSprints);
+        if (state === "active") return Promise.resolve([activeSprint]);
+        return Promise.resolve([]);
+      });
+
+      vi.spyOn(JiraClient.prototype, "getSprintIssues").mockImplementation(((sprintId: string) => {
+        if (sprintId === "200") {
+          // Active sprint: 1 done (3 SP), 1 in-progress (5 SP) → carryover = 5 SP
+          return Promise.resolve({
+            issues: [
+              {
+                key: "BP-50",
+                id: "50",
+                fields: {
+                  summary: "Done in active",
+                  status: { name: "Done", statusCategory: { name: "Done" } },
+                  story_points: 3,
+                },
+              },
+              {
+                key: "BP-51",
+                id: "51",
+                fields: {
+                  summary: "Still in progress",
+                  status: { name: "In Progress", statusCategory: { name: "indeterminate" } },
+                  story_points: 5,
+                },
+              },
+            ] as unknown as SearchIssue[],
+            total: 2,
+          });
+        }
+        // Closed sprints: 10 SP each
+        return Promise.resolve({
+          issues: makeSprintIssues(["Done", "Done"], [5, 5]),
+          total: 2,
+        });
+      }) as typeof JiraClient.prototype.getSprintIssues);
+
+      vi.spyOn(JiraClient.prototype, "getBacklogIssues").mockResolvedValue({
+        issues: [
+          {
+            key: "BP-60",
+            id: "60",
+            fields: { summary: "Backlog item 1", status: { name: "To Do" }, story_points: 3 },
+          },
+          {
+            key: "BP-61",
+            id: "61",
+            fields: { summary: "Backlog item 2", status: { name: "To Do" }, story_points: 2 },
+          },
+        ] as unknown as SearchIssue[],
+        total: 2,
+      });
+
+      const insights = getTool("insights");
+      const result = await insights({ action: "plan" });
+      expect(result.isError).toBeUndefined();
+      const text = getText(result);
+
+      expect(text).toContain("Sprint Planning Assistant");
+      expect(text).toContain("Velocity");
+      expect(text).toContain("Carryover");
+      expect(text).toContain("BP-51"); // carryover item
+      expect(text).toContain("Capacity");
+      expect(text).toContain("Available for new work");
+      expect(text).toContain("Recommended Items");
+      expect(text).toContain("BP-60");
+      expect(text).toContain("BP-61");
+    });
+
+    it("returns error when no board ID configured", async () => {
+      const { server, getTool } = createMockServer();
+
+      // Clear board ID from env — stored config has none either
+      delete process.env.JIRA_BOARD_ID;
+      // Use the main kb but it has no stored jiraBoardId config key,
+      // and env is now cleared, so config.jiraBoardId should be undefined
+      registerInsightsTool(server, () => kb);
+
+      const insights = getTool("insights");
+      const result = await insights({ action: "plan" });
+      expect(result.isError).toBe(true);
+      expect(getText(result)).toContain("No board ID configured");
+    });
+
+    it("returns error when no closed sprints exist (no velocity data)", async () => {
+      const { server, getTool } = createMockServer();
+      registerInsightsTool(server, () => kb);
+
+      vi.spyOn(JiraClient.prototype, "listSprints").mockImplementation(() => Promise.resolve([]));
+
+      const insights = getTool("insights");
+      const result = await insights({ action: "plan" });
+      expect(result.isError).toBe(true);
+      expect(getText(result)).toContain("No closed sprints found");
+    });
+
+    it("works with no active sprint (no carryover, full capacity)", async () => {
+      const { server, getTool } = createMockServer();
+      registerInsightsTool(server, () => kb);
+
+      mockClosedSprints(3);
+
+      vi.spyOn(JiraClient.prototype, "getBacklogIssues").mockResolvedValue({
+        issues: [
+          {
+            key: "BP-70",
+            id: "70",
+            fields: { summary: "Backlog task", status: { name: "To Do" }, story_points: 4 },
+          },
+        ] as unknown as SearchIssue[],
+        total: 1,
+      });
+
+      const insights = getTool("insights");
+      const result = await insights({ action: "plan" });
+      expect(result.isError).toBeUndefined();
+      const text = getText(result);
+
+      expect(text).toContain("Sprint Planning Assistant");
+      expect(text).toContain("No carryover items");
+      expect(text).toContain("Available for new work");
+      expect(text).toContain("BP-70");
+    });
+
+    it("shows stretch goals when items exceed capacity", async () => {
+      const { server, getTool } = createMockServer();
+      registerInsightsTool(server, () => kb);
+
+      // 2 closed sprints, 10 SP each → avg=10, no active sprint → capacity=10
+      mockClosedSprints(2);
+
+      vi.spyOn(JiraClient.prototype, "getBacklogIssues").mockResolvedValue({
+        issues: [
+          {
+            key: "BP-80",
+            id: "80",
+            fields: { summary: "Fits in capacity", status: { name: "To Do" }, story_points: 8 },
+          },
+          {
+            key: "BP-81",
+            id: "81",
+            fields: { summary: "Stretch item 1", status: { name: "To Do" }, story_points: 5 },
+          },
+          {
+            key: "BP-82",
+            id: "82",
+            fields: { summary: "Stretch item 2", status: { name: "To Do" }, story_points: 3 },
+          },
+        ] as unknown as SearchIssue[],
+        total: 3,
+      });
+
+      const insights = getTool("insights");
+      const result = await insights({ action: "plan" });
+      expect(result.isError).toBeUndefined();
+      const text = getText(result);
+
+      expect(text).toContain("Recommended Items");
+      expect(text).toContain("BP-80"); // fits in 10 SP capacity
+      expect(text).toContain("Stretch Goals");
+      expect(text).toContain("BP-81"); // doesn't fit
+    });
+
+    it("handles empty backlog gracefully", async () => {
+      const { server, getTool } = createMockServer();
+      registerInsightsTool(server, () => kb);
+
+      mockClosedSprints(2);
+
+      vi.spyOn(JiraClient.prototype, "getBacklogIssues").mockResolvedValue({
+        issues: [],
+        total: 0,
+      });
+
+      const insights = getTool("insights");
+      const result = await insights({ action: "plan" });
+      expect(result.isError).toBeUndefined();
+      const text = getText(result);
+
+      expect(text).toContain("Sprint Planning Assistant");
+      expect(text).toContain("Velocity");
+      expect(text).toContain("No items fit the available capacity");
+    });
+
+    it("shows overcommitment warning when carryover exceeds velocity", async () => {
+      const { server, getTool } = createMockServer();
+      registerInsightsTool(server, () => kb);
+
+      // 2 closed sprints, 10 SP each → avg=10
+      const closedSprints = [
+        { id: 100, name: "Sprint 100", state: "closed" as const },
+        { id: 101, name: "Sprint 101", state: "closed" as const },
+      ];
+      const activeSprint = { id: 200, name: "Sprint 200", state: "active" as const };
+
+      vi.spyOn(JiraClient.prototype, "listSprints").mockImplementation((_boardId: string, state?: string) => {
+        if (state === "closed") return Promise.resolve(closedSprints);
+        if (state === "active") return Promise.resolve([activeSprint]);
+        return Promise.resolve([]);
+      });
+
+      vi.spyOn(JiraClient.prototype, "getSprintIssues").mockImplementation(((sprintId: string) => {
+        if (sprintId === "200") {
+          // Active sprint with 9 SP carryover (>80% of avg 10)
+          return Promise.resolve({
+            issues: [
+              {
+                key: "BP-90",
+                id: "90",
+                fields: {
+                  summary: "Big carryover",
+                  status: { name: "In Progress", statusCategory: { name: "indeterminate" } },
+                  story_points: 9,
+                },
+              },
+            ] as unknown as SearchIssue[],
+            total: 1,
+          });
+        }
+        return Promise.resolve({
+          issues: makeSprintIssues(["Done", "Done"], [5, 5]),
+          total: 2,
+        });
+      }) as typeof JiraClient.prototype.getSprintIssues);
+
+      vi.spyOn(JiraClient.prototype, "getBacklogIssues").mockResolvedValue({
+        issues: [],
+        total: 0,
+      });
+
+      const insights = getTool("insights");
+      const result = await insights({ action: "plan" });
+      expect(result.isError).toBeUndefined();
+      const text = getText(result);
+
+      // Available capacity = 10 - 9 = 1, which is < 20% of 10
+      expect(text).toContain("Warning");
+      expect(text).toContain("capacity");
+    });
+  });
 });
