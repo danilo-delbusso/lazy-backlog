@@ -282,6 +282,59 @@ export function loadTeamInsights(kb: KnowledgeBase) {
   return { estimation, ownership, templates, patterns };
 }
 
+/** Check an issue for enrichment gaps and return suggestions. */
+export function checkEnrichmentGaps(
+  issue: { fields: Record<string, unknown> },
+  spFieldId?: string,
+): { gaps: string[]; suggestions: string[] } {
+  const gaps: string[] = [];
+  const suggestions: string[] = [];
+  const fields = issue.fields;
+
+  // Check description
+  const desc = fields.description;
+  const descText = typeof desc === "string" ? desc : "";
+  if (!desc || descText.length < 100) {
+    gaps.push("Description is very short or missing");
+    suggestions.push(
+      "Consider expanding the description with Context, Requirements, Acceptance Criteria, and Technical Notes sections",
+    );
+  }
+
+  // Check acceptance criteria
+  if (descText) {
+    const hasAC = /acceptance\s+criteria/i.test(descText) || /\bAC:/i.test(descText) || /- \[[ x]\]/i.test(descText);
+    if (!hasAC) {
+      gaps.push("No acceptance criteria found");
+      suggestions.push("Add acceptance criteria as checkboxes: `- [ ] Criterion`");
+    }
+  }
+
+  // Check story points
+  const spField = spFieldId || "story_points";
+  const sp = fields[spField] ?? fields.story_points ?? fields.customfield_10016;
+  if (sp == null) {
+    gaps.push("No story points assigned");
+    suggestions.push("Consider adding story points — typical Fibonacci scale: 1, 2, 3, 5, 8, 13");
+  }
+
+  // Check labels
+  const labels = fields.labels;
+  if (!labels || (Array.isArray(labels) && labels.length === 0)) {
+    gaps.push("No labels assigned");
+    suggestions.push("Add labels in kebab-case (e.g., tech-debt, customer-facing) — max 3 per ticket");
+  }
+
+  // Check components
+  const components = fields.components;
+  if (!components || (Array.isArray(components) && components.length === 0)) {
+    gaps.push("No components assigned");
+    suggestions.push("Assign a component to improve filtering and ownership tracking");
+  }
+
+  return { gaps, suggestions };
+}
+
 /** Build the KB context section for the ticket plan. */
 export function buildKbContextSection(ctx: ReturnType<typeof retrieveKbContext>): string {
   let plan = `## Confluence Context\n\n`;

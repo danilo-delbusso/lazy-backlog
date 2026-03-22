@@ -3,21 +3,14 @@ import { z } from "zod";
 import { buildJiraClient, errorResponse, textResponse } from "../lib/config.js";
 import type { KnowledgeBase } from "../lib/db.js";
 import { JiraClient } from "../lib/jira.js";
-import { DEFAULT_RULES, formatTeamStyleGuide, mergeWithDefaults } from "../lib/team-rules.js";
-import { evaluateConventions, formatConventionsSection } from "../lib/team-rules-format.js";
-import { handleBulkCreateAction, handleCreateAction } from "./issues-create.js";
+import { handleBulkCreateAction } from "./issues-bulk.js";
+import { handleCreateAction, handleDecomposeAction } from "./issues-create.js";
 import { handleGetAction, handleSearchAction } from "./issues-get.js";
-import {
-  boolPreprocess,
-  buildKbContextSection,
-  buildSchemaGuidance,
-  FIELD_RULES,
-  jsonPreprocess,
-  retrieveKbContext,
-} from "./issues-helpers.js";
+import { boolPreprocess, checkEnrichmentGaps, jsonPreprocess } from "./issues-helpers.js";
 
 // ── Barrel re-exports ─────────────────────────────────────────────────────────
 
+export * from "./issues-bulk.js";
 export * from "./issues-create.js";
 export * from "./issues-get.js";
 export * from "./issues-helpers.js";
@@ -198,104 +191,30 @@ async function handleUpdateAction(params: IssueParams, kb: KnowledgeBase) {
     }
 
     const changesList = changes.map((c) => `- ${c}`).join("\n");
-    return textResponse(`Updated **${params.issueKey}** — ${url}\n\nChanges:\n${changesList}`);
-  } catch (err: unknown) {
-    return errorResponse(`Failed to update ${params.issueKey}: ${err instanceof Error ? err.message : String(err)}`);
-  }
-}
+    let response = `Updated **${params.issueKey}** — ${url}\n\nChanges:\n${changesList}`;
 
-function formatEpicDetails(epic: {
-  key: string;
-  summary: string;
-  status: string;
-  priority: string;
-  labels: string[];
-  description?: string;
-}) {
-  let plan = `# Epic Decomposition: ${epic.key}\n\n`;
-  plan += `## Epic Details\n`;
-  plan += `**Summary:** ${epic.summary}\n`;
-  plan += `**Status:** ${epic.status} | **Priority:** ${epic.priority}\n`;
-  if (epic.labels.length) plan += `**Labels:** ${epic.labels.join(", ")}\n`;
-  if (epic.description) plan += `\n### Description\n${epic.description}\n`;
-  plan += `\n`;
-  return plan;
-}
-
-function formatExistingChildren(children: {
-  issues: Array<{
-    key: string;
-    fields: {
-      summary: string;
-      status?: { name: string };
-      priority?: { name: string };
-      assignee?: { displayName: string };
-    };
-  }>;
-  total: number;
-}) {
-  if (children.issues.length === 0) return `## Existing Stories\nNone found.\n\n`;
-
-  let plan = `## Existing Stories (${children.issues.length}/${children.total})\n\n`;
-  plan += `| Key | Summary | Status | Priority | Assignee |\n`;
-  plan += `|-----|---------|--------|----------|----------|\n`;
-  for (const issue of children.issues) {
-    plan += `| ${issue.key} | ${issue.fields.summary} | ${issue.fields.status?.name ?? "Unknown"} | ${issue.fields.priority?.name ?? "None"} | ${issue.fields.assignee?.displayName || "Unassigned"} |\n`;
-  }
-  plan += `\n`;
-  return plan;
-}
-
-function buildTeamStyleSection(kb: KnowledgeBase) {
-  const teamRules = kb.getTeamRules();
-  const rules = teamRules.map((r) => ({
-    category: r.category,
-    rule_key: r.rule_key,
-    issue_type: r.issue_type,
-    rule_value: r.rule_value,
-    confidence: r.confidence,
-    sample_size: r.sample_size,
-  }));
-  return mergeWithDefaults(rules, DEFAULT_RULES);
-}
-
-async function handleDecomposeAction(params: IssueParams, kb: KnowledgeBase) {
-  if (!params.epicKey) return errorResponse("epicKey is required for 'decompose' action.");
-
-  try {
-    const { jira } = buildJiraClient(kb);
-    const schema = JiraClient.loadSchemaFromDb(kb);
-
-    const epic = await jira.getIssue(params.epicKey);
-    const children = await jira.searchIssues(`parent = ${params.epicKey}`);
-
-    const epicDescription = epic.description || epic.summary;
-    const ctx = retrieveKbContext(kb, epicDescription, params.spaceKey);
-    const issueType = params.issueType || "Task";
-
-    let plan = formatEpicDetails(epic);
-    plan += formatExistingChildren(children);
-    plan += buildSchemaGuidance(schema, issueType);
-
-    const merged = buildTeamStyleSection(kb);
-    const styleGuide = formatTeamStyleGuide(merged);
-    if (styleGuide.trim()) {
-      plan += `\n${styleGuide}\n`;
+    // Enrichment gap check
+    try {
+      const updated = await jira.getIssue(params.issueKey);
+      const schema = JiraClient.loadSchemaFromDb(kb);
+      const spFieldId = schema?.board?.estimationField;
+      const { gaps, suggestions } = checkEnrichmentGaps(
+        { fields: updated as unknown as Record<string, unknown> },
+        spFieldId,
+      );
+      if (gaps.length > 0) {
+        response += `\n\n## Enrichment Suggestions\n`;
+        for (let i = 0; i < gaps.length; i++) {
+          response += `\n- **${gaps[i]}**\n  ${suggestions[i]}\n`;
+        }
+      }
+    } catch {
+      // best-effort enrichment check
     }
 
-    const conventions = evaluateConventions(
-      { summary: epic.summary, description: epic.description, issueType, labels: epic.labels },
-      merged,
-    );
-    const conventionsText = formatConventionsSection(conventions);
-    if (conventionsText) plan += `\n${conventionsText}\n\n`;
-
-    plan += buildKbContextSection(ctx);
-    plan += `---\nUse **issues** (action=create or bulk-create) with parentKey="${params.epicKey}" to create child stories.\n`;
-    plan += FIELD_RULES;
-    return textResponse(plan);
+    return textResponse(response);
   } catch (err: unknown) {
-    return errorResponse(`Failed to decompose ${params.epicKey}: ${err instanceof Error ? err.message : String(err)}`);
+    return errorResponse(`Failed to update ${params.issueKey}: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -306,9 +225,9 @@ export function registerIssuesTool(server: McpServer, getKb: () => KnowledgeBase
     "issues",
     {
       description:
-        "Jira issue CRUD and planning. IMPORTANT: 'create' and 'bulk-create' ALWAYS return a preview first. You MUST show the preview to the user and wait for their explicit approval before calling again with confirmed=true. NEVER set confirmed=true without user approval. Actions: 'get' fetch one or many issue details (pass issueKey for single, issueKeys for bulk). 'create' create one issue (returns preview — user must approve before confirmed=true). 'bulk-create' create multiple (returns preview — user must approve before confirmed=true). 'update' modify fields, transition status, assign, or link. 'search' query via JQL (auto-scoped to configured board). 'decompose' break an epic into child stories. For epic progress, velocity, retros, and team profile use the 'insights' tool. For bug-specific workflows (find, assess, triage) use the 'bugs' tool. For backlog listing and ranking use the 'backlog' tool. For sprint operations use the 'sprints' tool.",
+        "Jira issue CRUD and planning. IMPORTANT: 'create' ALWAYS returns a preview first. You MUST show the preview to the user and wait for their explicit approval before calling again with confirmed=true. NEVER set confirmed=true without user approval. Actions: 'get' fetch one or many issue details (pass issueKey for single, issueKeys for bulk). 'create' create one issue, bulk-create multiple (pass tickets array), or decompose an epic (pass epicKey without summary) — all return preview first. 'update' modify fields, transition status, assign, or link — includes enrichment gap suggestions. 'search' query via JQL (auto-scoped to configured board). For epic progress, velocity, retros, and team profile use the 'insights' tool. For bug-specific workflows (find, assess, triage) use the 'bugs' tool. For backlog listing and ranking use the 'backlog' tool. For sprint operations use the 'sprints' tool.",
       inputSchema: z.object({
-        action: z.enum(["get", "create", "bulk-create", "update", "search", "decompose"]),
+        action: z.enum(["get", "create", "update", "search"]),
         // Shared identifiers
         issueKey: z.string().optional().describe("[get, update] Single issue key, e.g. 'BP-42'"),
         issueKeys: z
@@ -326,17 +245,14 @@ export function registerIssuesTool(server: McpServer, getKb: () => KnowledgeBase
         priority: z.string().optional().describe("[create, update] Priority name, e.g. 'High', 'Medium'"),
         labels: z.array(z.string()).optional().describe("[create, update] Labels in kebab-case, e.g. ['tech-debt']"),
         storyPoints: z.number().optional().describe("[create, update] Story points (Fibonacci: 1,2,3,5,8,13)"),
-        parentKey: z
-          .string()
-          .optional()
-          .describe("[create, bulk-create] Parent epic key, e.g. 'BP-10'. Alias for 'parent'"),
+        parentKey: z.string().optional().describe("[create] Parent epic key, e.g. 'BP-10'. Alias for 'parent'"),
         components: z.array(z.string()).optional().describe("[create, update] Component names"),
         namedFields: z
           .record(z.string(), z.union([z.string(), z.null()]))
           .optional()
           .describe("[create, update] Custom fields as {'Field Name': 'Value Name'}. Pass null to clear a field."),
         comment: z.string().optional().describe("[update] Add a comment to the issue"),
-        // bulk-create
+        // bulk-create (via create action with tickets array)
         tickets: z.preprocess(
           jsonPreprocess,
           z
@@ -354,13 +270,13 @@ export function registerIssuesTool(server: McpServer, getKb: () => KnowledgeBase
               }),
             )
             .optional()
-            .describe("[bulk-create] Array of ticket objects to create"),
+            .describe("[create] Array of ticket objects for bulk creation"),
         ),
         confirmed: z
           .preprocess(boolPreprocess, z.boolean().default(false))
           .optional()
           .describe(
-            "[create, bulk-create] ONLY set true AFTER showing the preview to the user AND receiving their explicit approval. Default false (preview only). NEVER set true on the first call.",
+            "[create] ONLY set true AFTER showing the preview to the user AND receiving their explicit approval. Default false (preview only). NEVER set true on the first call.",
           ),
         // search
         jql: z.string().optional().describe("[search] JQL query string"),
@@ -370,8 +286,8 @@ export function registerIssuesTool(server: McpServer, getKb: () => KnowledgeBase
         // ranking
         rankBefore: z.string().optional().describe("[update] Rank this issue before the specified issue key"),
         rankAfter: z.string().optional().describe("[update] Rank this issue after the specified issue key"),
-        // decompose
-        epicKey: z.string().optional().describe("[decompose] Epic issue key"),
+        // decompose (via create action with epicKey and no summary)
+        epicKey: z.string().optional().describe("[create] Epic key for decomposition — pass without summary"),
         // update extras
         status: z.string().optional().describe("[update] Transition to this status name, e.g. 'In Progress', 'Done'"),
         assignee: z.string().optional().describe("[update] Assignee account ID, or 'unassigned' to clear"),
@@ -385,10 +301,7 @@ export function registerIssuesTool(server: McpServer, getKb: () => KnowledgeBase
           )
           .optional()
           .describe("[update] Create issue links"),
-        spaceKey: z
-          .string()
-          .optional()
-          .describe("[create, bulk-create, decompose] Confluence space key to search for relevant context"),
+        spaceKey: z.string().optional().describe("[create] Confluence space key to search for relevant context"),
       }),
     },
     async (params) => {
@@ -397,16 +310,15 @@ export function registerIssuesTool(server: McpServer, getKb: () => KnowledgeBase
       switch (params.action) {
         case "get":
           return handleGetAction(params, kb);
-        case "create":
+        case "create": {
+          if (params.tickets && params.tickets.length > 0) return handleBulkCreateAction(params, kb);
+          if (params.epicKey && !params.summary) return handleDecomposeAction(params, kb);
           return handleCreateAction(params, kb);
-        case "bulk-create":
-          return handleBulkCreateAction(params, kb);
+        }
         case "update":
           return handleUpdateAction(params, kb);
         case "search":
           return handleSearchAction(params, kb);
-        case "decompose":
-          return handleDecomposeAction(params, kb);
         default:
           return errorResponse(`Unknown action: ${params.action}`);
       }
