@@ -19,6 +19,58 @@ type ToolResponse = {
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
+function detectAnomalies(kb: KnowledgeBase): string[] {
+  const anomalies: string[] = [];
+  try {
+    const allInsights = kb.getAllInsights();
+    if (allInsights.length === 0) return anomalies;
+
+    // Check ownership: single point of failure (>50% of a component)
+    const ownershipRows = allInsights.filter((r) => r.category === "ownership");
+    for (const row of ownershipRows) {
+      try {
+        const data = JSON.parse(row.data) as {
+          component: string;
+          owners: Array<{ assignee: string; percentage: number }>;
+        };
+        for (const owner of data.owners ?? []) {
+          if (owner.percentage > 50) {
+            anomalies.push(
+              `**${data.component}**: ${owner.assignee} handles ${Math.round(owner.percentage)}% — single point of failure risk`,
+            );
+          }
+        }
+      } catch {
+        /* skip malformed */
+      }
+    }
+
+    // Check estimation: slow issue types (pointsToDaysRatio > 2x average)
+    const estRows = allInsights.filter((r) => r.category === "estimation");
+    const estData: Array<{ issueType: string; pointsToDaysRatio: number }> = [];
+    for (const row of estRows) {
+      try {
+        const data = JSON.parse(row.data) as { issueType: string; pointsToDaysRatio: number };
+        if (data.pointsToDaysRatio > 0) estData.push(data);
+      } catch {
+        /* skip */
+      }
+    }
+    if (estData.length > 1) {
+      const avgRatio = estData.reduce((s, d) => s + d.pointsToDaysRatio, 0) / estData.length;
+      for (const d of estData) {
+        if (d.pointsToDaysRatio > avgRatio * 2) {
+          const multiplier = Math.round((d.pointsToDaysRatio / avgRatio) * 10) / 10;
+          anomalies.push(`**${d.issueType}**: ${multiplier}x avg cycle time per point — slow issue type`);
+        }
+      }
+    }
+  } catch {
+    /* graceful degradation */
+  }
+  return anomalies;
+}
+
 function handleTeamProfile(kb: KnowledgeBase): ToolResponse {
   const insights = loadTeamInsights(kb);
   const teamRules = kb.getTeamRules();
@@ -59,6 +111,13 @@ function handleTeamProfile(kb: KnowledgeBase): ToolResponse {
       }
       lines.push("");
     }
+  }
+
+  const anomalies = detectAnomalies(kb);
+  if (anomalies.length > 0) {
+    lines.push("\n## Anomalies\n");
+    for (const a of anomalies) lines.push(`- ${a}`);
+    lines.push("");
   }
 
   return textResponse(lines.join("\n"));
@@ -148,6 +207,56 @@ async function handleEpicProgress(params: { epicKey?: string }, kb: KnowledgeBas
         // Velocity data unavailable — skip forecast
       }
     }
+  }
+
+  // Blocker chain detection: check first 10 non-done issues for blocking links
+  try {
+    const epicKeys = new Set(issues.map((i) => i.key));
+    const blockers: Array<{ blocker: string; blocked: string[]; blockedSP: number }> = [];
+    const toCheck = remaining.slice(0, 10);
+
+    for (const r of toCheck) {
+      try {
+        const links = await jira.getIssueLinks(r.key);
+        const blockedKeys = links
+          .filter((l) => l.direction === "outward" && /block/i.test(l.type) && epicKeys.has(l.linkedIssue.key))
+          .map((l) => l.linkedIssue.key);
+
+        if (blockedKeys.length > 0) {
+          let blockedSP = 0;
+          for (const bk of blockedKeys) {
+            const blocked = issues.find((i) => i.key === bk);
+            if (blocked) {
+              const f = blocked.fields as Record<string, unknown>;
+              blockedSP +=
+                (spField ? (f[spField] as number | undefined) : undefined) ??
+                (f.story_points as number | undefined) ??
+                (f.customfield_10016 as number | undefined) ??
+                0;
+            }
+          }
+          blockers.push({ blocker: r.key, blocked: blockedKeys, blockedSP });
+        }
+      } catch {
+        /* skip if links unavailable */
+      }
+    }
+
+    if (blockers.length > 0) {
+      out += `\n## Blockers\n`;
+      for (const b of blockers) {
+        const status = remaining.find((r) => r.key === b.blocker)?.status ?? "Unknown";
+        out += `- **${b.blocker}** (${status}) blocks ${b.blocked.join(", ")}`;
+        if (b.blockedSP > 0) out += ` (${b.blockedSP} SP)`;
+        out += `\n`;
+      }
+      const totalBlockedSP = blockers.reduce((s, b) => s + b.blockedSP, 0);
+      if (totalBlockedSP > 0) {
+        out += `\nResolving blockers unblocks **${totalBlockedSP} SP** on the critical path.\n`;
+      }
+    }
+  } catch {
+    /* graceful: skip blocker detection if links unavailable */
   }
 
   const behindSchedule = remainingPoints > completedPoints;

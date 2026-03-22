@@ -368,11 +368,35 @@ export async function handleRetroAction(
   const bugCount = issues.filter((i) => (i.fields.issuetype?.name ?? "").toLowerCase() === "bug").length;
   const bugRatio = issues.length > 0 ? Math.round((bugCount / issues.length) * 100) : 0;
 
+  // Sprint-over-sprint comparison: compare this sprint to trailing 3-sprint average
+  let comparisonSection = "";
+  if (velocity.sprints.length > 1) {
+    const trailing = velocity.sprints.slice(1, 4); // skip index 0 (current sprint)
+    if (trailing.length > 0) {
+      const avgCompleted = Math.round(trailing.reduce((s, sp) => s + sp.completed, 0) / trailing.length);
+      const avgCarryOver = Math.round((trailing.reduce((s, sp) => s + sp.carryOver, 0) / trailing.length) * 10) / 10;
+      const currentCompleted = velocity.sprints[0]?.completed ?? completedSP;
+      const currentCarryOver = carryOver.length;
+
+      const velDelta = avgCompleted > 0 ? Math.round(((currentCompleted - avgCompleted) / avgCompleted) * 100) : 0;
+      const carryDelta = avgCarryOver > 0 ? Math.round(((currentCarryOver - avgCarryOver) / avgCarryOver) * 100) : 0;
+
+      // Bug ratio comparison from historical issues (approximate from velocity data)
+      const trend = velDelta > 5 ? "improving" : velDelta < -5 ? "declining" : "stable";
+
+      comparisonSection = `\n## vs ${trailing.length}-Sprint Average\n\n`;
+      comparisonSection += `- **Velocity:** ${velDelta >= 0 ? "+" : ""}${velDelta}% (${currentCompleted} vs ${avgCompleted} SP)\n`;
+      comparisonSection += `- **Carry-over:** ${carryDelta >= 0 ? "+" : ""}${carryDelta}% (${currentCarryOver} vs ${avgCarryOver})\n`;
+      comparisonSection += `- **Trend:** ${trend}\n`;
+    }
+  }
+
   const out =
     formatHeader(sprint) +
     formatHealthSection(health, velocity, completionRate, completedSP, carryOver.length, bugRatio) +
     formatVelocityTrend(velocity) +
     formatEstimationAccuracy(completedSP, totalSP, velocity.average) +
+    comparisonSection +
     formatCycleTimeSection(cycleData) +
     formatSummarySection(issues.length, completed.length, carryOver.length, totalSP, completedSP, completionRate) +
     formatCompletedByType(completedByType) +

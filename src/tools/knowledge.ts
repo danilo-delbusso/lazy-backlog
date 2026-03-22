@@ -1,7 +1,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { errorResponse, formatLabels, textResponse } from "../lib/config.js";
+import { buildJiraClient, errorResponse, formatLabels, textResponse } from "../lib/config.js";
 import type { KnowledgeBase, PageSummary } from "../lib/db.js";
+import { loadSchemaFromDb } from "../lib/jira-schema.js";
 import { buildSuggestions } from "./suggestions.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -55,6 +56,44 @@ export function appendSection(
   return budget;
 }
 
+// ── Intelligence Helpers ─────────────────────────────────────────────────────
+
+function formatResultSummary(items: Array<{ page_type: string; updated_at?: string | null; source?: string }>): string {
+  if (items.length <= 1) return "";
+
+  const byType: Record<string, number> = {};
+  const bySrc: Record<string, number> = {};
+  let oldest = Number.POSITIVE_INFINITY;
+  let newest = 0;
+
+  for (const item of items) {
+    byType[item.page_type] = (byType[item.page_type] || 0) + 1;
+    if (item.source) bySrc[item.source] = (bySrc[item.source] || 0) + 1;
+    if (item.updated_at) {
+      const ts = new Date(item.updated_at).getTime();
+      if (ts < oldest) oldest = ts;
+      if (ts > newest) newest = ts;
+    }
+  }
+
+  const typeParts = Object.entries(byType).map(([k, v]) => `${v} ${k}`);
+  let summary = `\n\n**Result Summary:** ${items.length} results — ${typeParts.join(", ")}.`;
+
+  if (newest > 0) {
+    const newestDays = Math.floor((Date.now() - newest) / 86_400_000);
+    const oldestDays = Math.floor((Date.now() - oldest) / 86_400_000);
+    summary += ` Most recent: ${newestDays}d ago.`;
+    if (oldestDays > 180) summary += ` Oldest: ${oldestDays}d ago (may need review).`;
+  }
+  if (Object.keys(bySrc).length > 1) {
+    summary += ` Sources: ${Object.entries(bySrc)
+      .map(([k, v]) => `${k}:${v}`)
+      .join(", ")}.`;
+  }
+
+  return summary;
+}
+
 // ── Action Handlers ──────────────────────────────────────────────────────────
 
 function handleSearch(
@@ -77,8 +116,10 @@ function handleSearch(
       return `${i + 1}. **${c.page_title}** \u203A ${location} [${c.page_type}]${urlSuffix}\n   ${c.snippet}`;
     });
 
+    const chunkSummary = formatResultSummary(chunks.map((c) => ({ page_type: c.page_type, source: c.source })));
+
     return textResponse(
-      `${chunks.length} results (section-level):\n\n${lines.join("\n\n")}` +
+      `${chunks.length} results (section-level):\n\n${lines.join("\n\n")}${chunkSummary}` +
         "\n\nUse **get-page** with a page ID for full content if needed.",
     );
   }
@@ -97,7 +138,9 @@ function handleSearch(
     return `${i + 1}. **${r.title}** [${r.page_type}]${urlSuffix}\n   ${r.snippet}`;
   });
 
-  return textResponse(`${results.length} results:\n\n${lines.join("\n\n")}`);
+  const pageSummary = formatResultSummary(results.map((r) => ({ page_type: r.page_type, source: r.source })));
+
+  return textResponse(`${results.length} results:\n\n${lines.join("\n\n")}${pageSummary}`);
 }
 
 function handleStats(
@@ -124,6 +167,37 @@ function handleStats(
       .map(([k, v]) => `  ${k}: ${v}`)
       .join("\n");
     out += `\n\nBy source:\n${sources}`;
+  }
+
+  // ── Coverage gap detection ──
+  try {
+    const gaps: string[] = [];
+    if (!stats.byType.adr) gaps.push("No ADRs indexed — consider documenting architectural decisions.");
+    if (!stats.byType.runbook) gaps.push("No runbooks indexed — consider documenting operational procedures.");
+
+    const schema = loadSchemaFromDb(kb);
+    if (schema) {
+      const components = new Set<string>();
+      for (const issueType of schema.issueTypes) {
+        const compField = issueType.fields.find((f) => f.id === "components");
+        for (const v of compField?.allowedValues ?? []) components.add(v.name);
+      }
+      if (components.size > 0) {
+        const undocumented: string[] = [];
+        for (const comp of components) {
+          const results = kb.search(comp, { limit: 1 });
+          if (results.length === 0) undocumented.push(comp);
+        }
+        if (undocumented.length > 0) {
+          gaps.push(`No documentation found for components: ${undocumented.join(", ")}.`);
+        }
+      }
+    }
+    if (gaps.length > 0) {
+      out += `\n\n**Coverage Gaps:**\n${gaps.map((g) => `- ${g}`).join("\n")}`;
+    }
+  } catch {
+    /* graceful: skip coverage gap detection */
   }
 
   // ── Context summary (ADRs, designs, specs) ──
@@ -204,7 +278,7 @@ function handleStats(
   return textResponse(out + suggestions);
 }
 
-function handleGetPage(params: { pageId?: string }, kb: KnowledgeBase): ToolResponse {
+async function handleGetPage(params: { pageId?: string }, kb: KnowledgeBase): Promise<ToolResponse> {
   if (!params.pageId) return errorResponse("'pageId' is required for get-page action.");
   const page = kb.getPage(params.pageId);
   if (!page) return errorResponse(`Page ${params.pageId} not found in knowledge base.`);
@@ -214,11 +288,57 @@ function handleGetPage(params: { pageId?: string }, kb: KnowledgeBase): ToolResp
       ? `${page.content.slice(0, MAX_PAGE_CHARS)}\n\n\u2026[truncated \u2014 ${page.content.length} chars total]`
       : page.content;
 
+  // Freshness indicator
+  let freshness = "";
+  if (page.updated_at) {
+    const daysAgo = Math.floor((Date.now() - new Date(page.updated_at).getTime()) / 86_400_000);
+    const label = daysAgo < 30 ? "Fresh" : daysAgo < 90 ? "Aging" : "Stale — may need review";
+    freshness = ` | **${label}** (${daysAgo}d ago)`;
+  }
+
+  // Related pages: search KB for pages with similar title keywords
+  let relatedSection = "";
+  try {
+    const titleKeywords = page.title
+      .split(/[\s\-_/]+/)
+      .filter((w) => w.length > 3)
+      .slice(0, 3)
+      .join(" ");
+    if (titleKeywords) {
+      const related = kb.search(titleKeywords, { limit: 5 });
+      const others = related.filter((r) => r.id !== page.id);
+      if (others.length > 0) {
+        relatedSection += `\n\n**Related pages:** ${others.map((r) => `${r.title} [${r.page_type}]`).join(", ")}`;
+      }
+    }
+  } catch {
+    /* graceful */
+  }
+
+  // Ticket references: search Jira for issues mentioning this page
+  let ticketRefs = "";
+  try {
+    const { jira } = buildJiraClient(kb);
+    const searchTerms = page.title
+      .split(/\s+/)
+      .slice(0, 4)
+      .join(" ")
+      .replace(/[\\"[\]()]/g, "");
+    if (searchTerms.length > 3) {
+      const { issues } = await jira.searchIssues(`summary ~ "${searchTerms}"`, undefined, 5);
+      if (issues.length > 0) {
+        ticketRefs = `\n**Referenced by:** ${issues.map((i) => `${i.key}`).join(", ")}`;
+      }
+    }
+  } catch {
+    /* graceful: skip if Jira not configured */
+  }
+
   return textResponse(
     `# ${page.title}\n` +
-      `${page.page_type} | ${page.space_key} | ${formatLabels(page.labels)} | ${page.updated_at ?? "?"}\n` +
+      `${page.page_type} | ${page.space_key} | ${formatLabels(page.labels)} | ${page.updated_at ?? "?"}${freshness}\n` +
       (page.url ? `${page.url}\n` : "") +
-      `---\n${body}`,
+      `---\n${body}${relatedSection}${ticketRefs}`,
   );
 }
 
