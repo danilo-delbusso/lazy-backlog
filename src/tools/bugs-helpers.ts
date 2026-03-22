@@ -2,174 +2,50 @@ import type { ProjectConfig } from "../config/schema.js";
 import { buildJiraClient, errorResponse, textResponse } from "../lib/config.js";
 import type { KnowledgeBase } from "../lib/db.js";
 import type { JiraClient } from "../lib/jira.js";
+import type { PatternInsight } from "../lib/team-insights-types.js";
 import { DEFAULT_RULES, mergeWithDefaults } from "../lib/team-rules.js";
 import { evaluateConventions, formatConventionsSection } from "../lib/team-rules-format.js";
 import { assessCompleteness, inferSeverity, type ToolResponse } from "./bugs.js";
 
-// ── find-bugs ────────────────────────────────────────────────────────────────
+// ── Rework risk helpers ─────────────────────────────────────────────────────
 
-const DEFAULT_BUG_JQL = 'type = Bug AND status = "To Do" AND sprint is EMPTY ORDER BY created DESC';
-
-export async function handleFindBugs(
-  params: { jql?: string; maxResults?: number; dateRange?: string; component?: string },
-  kb: KnowledgeBase,
-): Promise<ToolResponse> {
+function loadReworkRates(kb: KnowledgeBase): PatternInsight["reworkRates"] {
   try {
-    const { jira, config } = buildJiraClient(kb);
-    let jql = params.jql || DEFAULT_BUG_JQL;
-    if (!params.jql) {
-      if (params.dateRange) {
-        jql = jql.replace("ORDER BY", `AND created >= -${params.dateRange} ORDER BY`);
-      }
-      if (params.component) {
-        const escaped = params.component.replaceAll("'", String.raw`\'`);
-        jql = jql.replace("ORDER BY", `AND component = '${escaped}' ORDER BY`);
-      }
-    }
-    const maxResults = params.maxResults ?? 20;
-    const boardId = config.jiraBoardId;
-    const { issues, total } = boardId
-      ? await jira.searchBoardIssues(boardId, jql, maxResults)
-      : await jira.searchIssues(jql, undefined, maxResults);
-
-    if (issues.length === 0) {
-      return textResponse("# Bug Triage\n\nNo untriaged bugs found matching criteria.");
-    }
-
-    let out = `# Untriaged Bugs (${issues.length} of ${total})\n\n`;
-    out += "| Key | Summary | Reporter | Created | Priority |\n";
-    out += "|-----|---------|----------|---------|----------|\n";
-    for (const i of issues) {
-      const f = i.fields;
-      const reporter = (f as Record<string, unknown>).reporter as { displayName?: string } | undefined;
-      const reporterName = reporter?.displayName || "Unknown";
-      out += `| ${i.key} | ${(f.summary || "").slice(0, 50)} | ${reporterName} | ${(f.created || "").slice(0, 10)} | ${f.priority?.name || "None"} |\n`;
-    }
-    out += "\nUse `assess` with issueKeys to check completeness.";
-    return textResponse(out);
-  } catch (err: unknown) {
-    return errorResponse(`Triage error: ${err instanceof Error ? err.message : String(err)}`);
+    const patternsRaw = kb.getInsights("patterns");
+    if (patternsRaw.length === 0) return [];
+    const patterns = JSON.parse(patternsRaw[0]?.data ?? "{}") as PatternInsight;
+    return patterns.reworkRates ?? [];
+  } catch {
+    return [];
   }
 }
 
-// ── search ───────────────────────────────────────────────────────────────────
+function formatReworkWarning(components: string[], reworkRates: PatternInsight["reworkRates"]): string {
+  if (components.length === 0 || reworkRates.length === 0) return "";
 
-export async function handleSearchBugs(
-  params: { jql?: string; maxResults?: number },
-  kb: KnowledgeBase,
-): Promise<ToolResponse> {
-  if (!params.jql) return errorResponse("jql is required for 'search' action.");
-  try {
-    const { jira, config } = buildJiraClient(kb);
-    let jql = params.jql;
-    const orderExec = /\s+(ORDER\s+BY\s+[^\n]+)$/i.exec(jql);
-    const orderClause = orderExec ? ` ${orderExec[1]}` : "";
-    const filterPart = orderExec ? jql.slice(0, orderExec.index) : jql;
-
-    const bugFilter = /\btype\s*[=!]/i.test(filterPart) ? filterPart : `type = Bug AND (${filterPart})`;
-
-    const projectScoped =
-      config.jiraProjectKey && !/\bproject\s*[=!]/i.test(bugFilter)
-        ? `project = ${config.jiraProjectKey} AND (${bugFilter})`
-        : bugFilter;
-
-    jql = `${projectScoped}${orderClause}`;
-    const maxResults = params.maxResults ?? 50;
-    const boardId = config.jiraBoardId;
-    const result = boardId
-      ? await jira.searchBoardIssues(boardId, jql, maxResults)
-      : await jira.searchIssues(jql, undefined, maxResults);
-
-    if (result.issues.length === 0) {
-      return textResponse(`No bugs found for: \`${params.jql}\``);
+  const warnings: string[] = [];
+  for (const comp of components) {
+    const rework = reworkRates.find((r) => r.component === comp);
+    if (rework && rework.reopenRate > 0.15) {
+      warnings.push(
+        `- **${comp}:** ${Math.round(rework.reopenRate * 100)}% reopen rate (${rework.reopenedTickets}/${rework.totalTickets} tickets)`,
+      );
     }
-
-    let out = `# Bug Search (${result.issues.length}/${result.total})\n\n`;
-    out += "| Key | Summary | Status | Priority | Assignee |\n";
-    out += "|-----|---------|--------|----------|----------|\n";
-    for (const issue of result.issues) {
-      out += `| ${issue.key} | ${issue.fields.summary} | ${issue.fields.status?.name ?? "Unknown"} | ${issue.fields.priority?.name ?? "None"} | ${issue.fields.assignee?.displayName || "Unassigned"} |\n`;
-    }
-    return textResponse(out);
-  } catch (err: unknown) {
-    return errorResponse(`Bug search failed: ${err instanceof Error ? err.message : String(err)}`);
   }
+
+  if (warnings.length === 0) return "";
+  return `## Risk Warning\n\n${warnings.join("\n")}\n> Consider extra review/testing for these components.\n\n`;
 }
 
-// ── assess ───────────────────────────────────────────────────────────────────
+// ── Convention helpers ──────────────────────────────────────────────────────
 
-export async function handleAssess(
-  params: { issueKeys?: string[]; autoComment?: boolean },
+function formatConventions(
+  issue: { summary: string; description?: string; labels: string[]; components: string[] },
   kb: KnowledgeBase,
-): Promise<ToolResponse> {
-  if (!params.issueKeys?.length) {
-    return errorResponse("issueKeys required for assess action.");
-  }
-  try {
-    const { jira } = buildJiraClient(kb);
-
-    let out = "# Bug Assessment\n\n";
-    for (const key of params.issueKeys) {
-      const issue = await jira.getIssue(key);
-      const { score, missing } = assessCompleteness(issue.description, issue.labels, issue.components);
-
-      out += `## ${key}: ${issue.summary}\n`;
-      out += `**Completeness:** ${score}%\n`;
-
-      if (missing.length > 0) {
-        out += "**Missing:**\n";
-        for (const m of missing) out += `- ${m}\n`;
-      } else {
-        out += "**Status:** Complete\n";
-      }
-
-      if (score < 60 && (params.autoComment ?? true)) {
-        const missingList = missing.map((m) => `- ${m}`).join("\n");
-        const comment = `This bug report is incomplete (score: ${score}%). Please add:\n${missingList}`;
-        await jira.addComment(key, comment);
-        await jira.addLabels(key, ["needs-info"]);
-        out += "*Comment added + labeled `needs-info`*\n";
-      }
-      out += "\n";
-    }
-    return textResponse(out);
-  } catch (err: unknown) {
-    return errorResponse(`Triage error: ${err instanceof Error ? err.message : String(err)}`);
-  }
-}
-
-// ── triage ───────────────────────────────────────────────────────────────────
-
-async function triageSingleIssue(
-  issueKey: string,
-  params: { severity?: string; autoUpdate?: boolean; autoAssign?: boolean },
-  jira: JiraClient,
-  config: ProjectConfig,
-  kb: KnowledgeBase,
-): Promise<string> {
-  const issue = await jira.getIssue(issueKey);
-  const text = `${issue.summary} ${issue.description || ""}`;
-  const inferred = inferSeverity(text);
-  const severity = params.severity || inferred.severity;
-
-  let out = `# Triage: ${issueKey}\n\n`;
-  out += "## Severity Analysis\n\n";
-  out += "| Key | Current | Recommended | Rationale |\n";
-  out += "|-----|---------|-------------|----------|\n";
-  out += `| ${issueKey} | ${issue.priority || "Unknown"} | ${inferred.severity} | ${inferred.matches.join(", ")} |\n\n`;
-
-  if (params.autoUpdate && inferred.severity.toLowerCase() !== (issue.priority || "").toLowerCase()) {
-    await jira.updateIssue({ issueKey, priority: inferred.severity });
-  }
-
-  const boardId = config.jiraBoardId;
-  if (boardId) {
-    out += await assignSprint(issueKey, severity, jira, boardId, params.autoAssign ?? false);
-  }
-
-  // Evaluate team conventions for the bug
+): string {
   try {
     const teamRules = kb.getTeamRules();
+    if (teamRules.length === 0) return "";
     const rules = teamRules.map((r) => ({
       category: r.category,
       rule_key: r.rule_key,
@@ -189,14 +65,88 @@ async function triageSingleIssue(
       },
       merged,
     );
-    const conventionsText = formatConventionsSection(conventions);
-    if (conventionsText) out += `\n${conventionsText}\n`;
+    const text = formatConventionsSection(conventions);
+    return text ? `## Team Conventions\n\n${text}\n\n` : "";
   } catch {
-    // conventions are best-effort
+    return "";
   }
+}
+
+// ── Completeness section ────────────────────────────────────────────────────
+
+function formatCompleteness(score: number, missing: string[]): string {
+  let out = "## Completeness\n\n";
+  out += `**Score:** ${score}%\n`;
+  if (missing.length > 0) {
+    out += "**Missing:**\n";
+    for (const m of missing) out += `- ${m}\n`;
+  } else {
+    out += "**Status:** Complete\n";
+  }
+  return out + "\n";
+}
+
+// ── Single-issue triage ─────────────────────────────────────────────────────
+
+async function triageSingleIssue(
+  issueKey: string,
+  params: { severity?: string; autoUpdate?: boolean; autoAssign?: boolean },
+  jira: JiraClient,
+  config: ProjectConfig,
+  kb: KnowledgeBase,
+): Promise<string> {
+  const issue = await jira.getIssue(issueKey);
+  const text = `${issue.summary} ${issue.description || ""}`;
+
+  let out = `# Triage: ${issueKey}\n\n`;
+
+  // ── Completeness ──────────────────────────────────────────────────────────
+  const { score, missing } = assessCompleteness(issue.description, issue.labels, issue.components);
+  out += formatCompleteness(score, missing);
+
+  // Auto-comment on incomplete bugs
+  if (score < 60 && (params.autoUpdate ?? false)) {
+    const missingList = missing.map((m) => `- ${m}`).join("\n");
+    const comment = `This bug report is incomplete (score: ${score}%). Please add:\n${missingList}`;
+    await jira.addComment(issueKey, comment);
+    await jira.addLabels(issueKey, ["needs-info"]);
+    out += "*Comment added + labeled `needs-info`*\n\n";
+  }
+
+  // ── Severity ──────────────────────────────────────────────────────────────
+  const inferred = inferSeverity(text);
+  const severity = params.severity || inferred.severity;
+
+  out += "## Severity\n\n";
+  out += "| Key | Current | Recommended | Rationale |\n";
+  out += "|-----|---------|-------------|----------|\n";
+  out += `| ${issueKey} | ${issue.priority || "Unknown"} | ${inferred.severity} | ${inferred.matches.join(", ")} |\n\n`;
+
+  if (params.autoUpdate && inferred.severity.toLowerCase() !== (issue.priority || "").toLowerCase()) {
+    await jira.updateIssue({ issueKey, priority: inferred.severity });
+    out += "*Priority updated.*\n\n";
+  }
+
+  // ── Recommendation (sprint assignment) ────────────────────────────────────
+  const boardId = config.jiraBoardId;
+  if (boardId) {
+    out += await assignSprint(issueKey, severity, jira, boardId, params.autoAssign ?? false);
+  }
+
+  // ── Team Conventions ──────────────────────────────────────────────────────
+  out += formatConventions(
+    { summary: issue.summary, description: issue.description, labels: issue.labels, components: issue.components },
+    kb,
+  );
+
+  // ── Rework Risk Warning ───────────────────────────────────────────────────
+  const reworkRates = loadReworkRates(kb);
+  out += formatReworkWarning(issue.components, reworkRates);
 
   return out;
 }
+
+// ── Sprint assignment helpers ───────────────────────────────────────────────
 
 async function assignSprint(
   issueKey: string,
@@ -205,7 +155,7 @@ async function assignSprint(
   boardId: string,
   autoAssign: boolean,
 ): Promise<string> {
-  let out = "## Sprint Assignment\n\n";
+  let out = "## Recommendation\n\n";
   out += `**Severity:** ${severity}\n\n`;
 
   if (severity === "critical") {
@@ -228,7 +178,7 @@ async function assignCriticalSprint(
 ): Promise<string> {
   const activeSprints = await jira.listSprints(boardId, "active");
   const sprint = activeSprints[0];
-  if (!sprint) return "No active sprint found. Create one first.\n";
+  if (!sprint) return "No active sprint found. Create one first.\n\n";
 
   const { issues: sprintIssues } = await jira.getSprintIssues(String(sprint.id));
   const spField = jira.storyPointsFieldId;
@@ -253,7 +203,7 @@ async function assignCriticalSprint(
     out += "\n*Issue moved to sprint + comment added.*\n";
   }
 
-  return out;
+  return out + "\n";
 }
 
 async function assignHighSprint(
@@ -265,7 +215,7 @@ async function assignHighSprint(
 ): Promise<string> {
   const futureSprints = await jira.listSprints(boardId, "future");
   const nextSprint = futureSprints[0];
-  if (!nextSprint) return "No future sprints found. Create one or use the active sprint.\n";
+  if (!nextSprint) return "No future sprints found. Create one or use the active sprint.\n\n";
 
   let out = `**Recommendation:** Add to next sprint "${nextSprint.name}"\n`;
 
@@ -275,7 +225,7 @@ async function assignHighSprint(
     out += "\n*Issue moved to sprint + comment added.*\n";
   }
 
-  return out;
+  return out + "\n";
 }
 
 async function assignLowSprint(
@@ -287,7 +237,7 @@ async function assignLowSprint(
 ): Promise<string> {
   const futureSprints = await jira.listSprints(boardId, "future");
   const lastSprint = futureSprints.at(-1);
-  if (!lastSprint) return "No future sprints available. Leave in backlog.\n";
+  if (!lastSprint) return "No future sprints available. Leave in backlog.\n\n";
 
   let out = `**Recommendation:** Add to backlog or future sprint "${lastSprint.name}"\n`;
 
@@ -297,13 +247,17 @@ async function assignLowSprint(
     out += "\n*Issue moved to sprint + comment added.*\n";
   }
 
-  return out;
+  return out + "\n";
 }
 
-async function triageReport(issueKeys: string[], jira: JiraClient): Promise<string> {
+// ── Multi-issue triage report ───────────────────────────────────────────────
+
+async function triageReport(issueKeys: string[], jira: JiraClient, kb: KnowledgeBase): Promise<string> {
   const severityCounts: Record<string, number> = {};
   const statusCounts: Record<string, number> = {};
   const incomplete: string[] = [];
+  const reworkRates = loadReworkRates(kb);
+  const riskyComponents: string[] = [];
 
   for (const key of issueKeys) {
     const issue = await jira.getIssue(key);
@@ -313,6 +267,14 @@ async function triageReport(issueKeys: string[], jira: JiraClient): Promise<stri
 
     const { score } = assessCompleteness(issue.description, issue.labels, issue.components);
     if (score < 60) incomplete.push(key);
+
+    // Track risky components
+    for (const comp of issue.components) {
+      const rework = reworkRates.find((r) => r.component === comp);
+      if (rework && rework.reopenRate > 0.15 && !riskyComponents.includes(comp)) {
+        riskyComponents.push(comp);
+      }
+    }
   }
 
   let out = `# Triage Report (${issueKeys.length} bugs)\n\n`;
@@ -329,12 +291,24 @@ async function triageReport(issueKeys: string[], jira: JiraClient): Promise<stri
     out += incomplete.map((k) => `- ${k}`).join("\n");
     out += "\n";
   }
+  if (riskyComponents.length > 0) {
+    out += "\n## Risk Warning\n\n";
+    for (const comp of riskyComponents) {
+      const rework = reworkRates.find((r) => r.component === comp);
+      if (rework) {
+        out += `- **${comp}:** ${Math.round(rework.reopenRate * 100)}% reopen rate\n`;
+      }
+    }
+    out += "\n";
+  }
   return out;
 }
 
+// ── Public handler ──────────────────────────────────────────────────────────
+
 export async function handleTriage(
   params: {
-    issueKeys?: string[];
+    issueKeys: string[];
     severity?: string;
     autoUpdate?: boolean;
     autoAssign?: boolean;
@@ -353,7 +327,7 @@ export async function handleTriage(
       return textResponse(out);
     }
 
-    const out = await triageReport(params.issueKeys, jira);
+    const out = await triageReport(params.issueKeys, jira, kb);
     return textResponse(out);
   } catch (err: unknown) {
     return errorResponse(`Triage error: ${err instanceof Error ? err.message : String(err)}`);

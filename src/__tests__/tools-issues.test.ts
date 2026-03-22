@@ -1291,7 +1291,7 @@ describe("registerIssuesTool", () => {
     });
   });
 
-  // ── Triage actions (find-bugs, assess, triage) ─────────────────────────────
+  // ── Triage actions (moved to tools-bugs.test.ts) ───────────────────────────
 
   function getText(result: { content: { type: string; text: string }[] }): string {
     return (result.content[0] as { type: string; text: string }).text;

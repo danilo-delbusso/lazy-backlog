@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { errorResponse } from "../lib/config.js";
 import type { KnowledgeBase } from "../lib/db.js";
-import { handleAssess, handleFindBugs, handleSearchBugs, handleTriage } from "./bugs-helpers.js";
+import { handleTriage } from "./bugs-helpers.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -98,53 +98,32 @@ export function registerBugsTool(server: McpServer, getKb: () => KnowledgeBase) 
     "bugs",
     {
       description:
-        "Bug discovery, assessment, and triage. Actions: 'find-bugs' list untriaged bugs by date range. 'search' query bugs via JQL (auto-enforces type=Bug and project filter). 'assess' score a bug report's completeness (0-100). 'triage' prioritize a bug — recommends severity, sprint placement, and trade-offs. To get full details or update a bug, use the 'issues' tool with get/update actions.",
+        "Bug triage — the complete bug intelligence pipeline. Fetches issues, scores completeness, infers severity, recommends sprint placement, evaluates team conventions, and warns about high-rework components. Use the 'issues' tool for general get/search/update operations.",
       inputSchema: z.object({
-        action: z.enum(["find-bugs", "search", "assess", "triage"]),
-        jql: z.string().optional().describe("[find-bugs, search] JQL query string"),
-        maxResults: z.number().max(100).default(50).optional().describe("[find-bugs, search] Max issues to return"),
-        dateRange: z
-          .enum(["7d", "30d", "90d"])
-          .default("30d")
-          .optional()
-          .describe("[find-bugs] Only bugs created within this window"),
-        component: z.string().optional().describe("[find-bugs] Filter by component name"),
+        action: z.literal("triage"),
         issueKeys: z
           .array(z.string())
-          .optional()
-          .describe("[assess, triage] Issue keys to assess or triage, e.g. ['BP-1','BP-2']"),
-        autoComment: z
-          .boolean()
-          .default(true)
-          .optional()
-          .describe("[assess] Auto-add a comment to incomplete bugs requesting missing info"),
+          .describe("Issue keys to triage, e.g. ['BP-1','BP-2']"),
         autoUpdate: z
           .boolean()
           .default(false)
           .optional()
-          .describe("[triage] Auto-update priority based on severity analysis"),
+          .describe("Auto-update priority based on severity analysis and auto-comment on incomplete bugs"),
         severity: z
           .enum(["critical", "high", "medium", "low"])
           .optional()
-          .describe("[triage] Override inferred severity for sprint assignment"),
-        autoAssign: z.boolean().default(false).optional().describe("[triage] Auto-move issue to recommended sprint"),
+          .describe("Override inferred severity for sprint assignment"),
+        autoAssign: z.boolean().default(false).optional().describe("Auto-move issue to recommended sprint"),
       }),
     },
     async (params) => {
       const kb = getKb();
 
-      switch (params.action) {
-        case "find-bugs":
-          return handleFindBugs(params, kb);
-        case "search":
-          return handleSearchBugs(params, kb);
-        case "assess":
-          return handleAssess(params, kb);
-        case "triage":
-          return handleTriage(params, kb);
-        default:
-          return errorResponse(`Unknown action: ${params.action}`);
+      if (params.action === "triage") {
+        return handleTriage(params, kb);
       }
+
+      return errorResponse(`Unknown action: ${params.action}`);
     },
   );
 }
