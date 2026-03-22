@@ -173,7 +173,7 @@ describe("registerSprintsTool", () => {
   });
 
   describe("action=get", () => {
-    it("returns sprint with issue breakdown", async () => {
+    it("returns active sprint dashboard with issue breakdown", async () => {
       const { server, getTool } = createMockServer();
       registerSprintsTool(server, () => kb);
 
@@ -183,16 +183,7 @@ describe("registerSprintsTool", () => {
         name: "Sprint 10",
         state: "active",
         startDate: "2026-03-01T00:00:00Z",
-        endDate: "2026-03-14T00:00:00Z",
-        goal: "Deliver MVP",
-      });
-      // GET sprint details
-      mockFetchResponse({
-        id: 10,
-        name: "Sprint 10",
-        state: "active",
-        startDate: "2026-03-01T00:00:00Z",
-        endDate: "2026-03-14T00:00:00Z",
+        endDate: "2026-12-14T00:00:00Z",
         goal: "Deliver MVP",
       });
       // GET sprint issues
@@ -207,6 +198,7 @@ describe("registerSprintsTool", () => {
               priority: { name: "High" },
               assignee: { displayName: "Alice" },
               story_points: 3,
+              updated: new Date().toISOString(),
             },
           },
           {
@@ -218,6 +210,7 @@ describe("registerSprintsTool", () => {
               priority: { name: "Medium" },
               assignee: { displayName: "Bob" },
               story_points: 5,
+              updated: new Date().toISOString(),
             },
           },
           {
@@ -228,11 +221,19 @@ describe("registerSprintsTool", () => {
               issuetype: { name: "Task" },
               priority: { name: "Low" },
               assignee: null,
+              updated: new Date().toISOString(),
             },
           },
         ],
         total: 3,
         maxResults: 50,
+      });
+      // list closed sprints (for capacity)
+      mockFetchResponse({
+        values: [],
+        isLast: true,
+        maxResults: 50,
+        startAt: 0,
       });
 
       const sprints = getTool("sprints");
@@ -246,50 +247,130 @@ describe("registerSprintsTool", () => {
       expect(text).toContain("In Progress");
       expect(text).toContain("Alice");
       expect(text).toContain("Unassigned");
+      // Dashboard includes health info
+      expect(text).toContain("Sprint Health");
+      expect(text).toContain("Progress");
     });
 
-    it("returns error without sprintId", async () => {
+    it("resolves active sprint when no sprintId provided", async () => {
       const { server, getTool } = createMockServer();
       registerSprintsTool(server, () => kb);
 
-      const sprints = getTool("sprints");
-      const result = await sprints({ action: "get" });
-      expect(result.isError).toBe(true);
-      expect(result.content[0]?.text).toContain("sprintId is required");
-    });
-
-    it("displays sprint goal from getSprintDetails", async () => {
-      const { server, getTool } = createMockServer();
-      registerSprintsTool(server, () => kb);
-
-      // GET sprint (no goal in basic endpoint)
+      // list active sprints (resolveSprintId)
       mockFetchResponse({
-        id: 10,
-        name: "Sprint 10",
-        state: "active",
-        startDate: "2026-03-01T00:00:00Z",
-        endDate: "2026-03-14T00:00:00Z",
+        values: [{ id: 20, name: "Sprint 20", state: "active" }],
+        isLast: true,
+        maxResults: 50,
+        startAt: 0,
       });
-      // GET sprint details (has goal)
+      // GET sprint
       mockFetchResponse({
-        id: 10,
-        name: "Sprint 10",
+        id: 20,
+        name: "Sprint 20",
         state: "active",
         startDate: "2026-03-01T00:00:00Z",
-        endDate: "2026-03-14T00:00:00Z",
-        goal: "Ship the auth module",
+        endDate: "2026-12-14T00:00:00Z",
       });
       // GET sprint issues
       mockFetchResponse({
-        issues: [],
-        total: 0,
+        issues: makeSprintIssues(["Done", "In Progress"], [5, 3]),
+        total: 2,
+        maxResults: 50,
+      });
+      // list closed sprints (for capacity)
+      mockFetchResponse({
+        values: [],
+        isLast: true,
+        maxResults: 50,
+        startAt: 0,
+      });
+
+      const sprints = getTool("sprints");
+      const result = await sprints({ action: "get" });
+      const text = result.content[0]?.text ?? "";
+      expect(text).toContain("Sprint 20");
+    });
+
+    it("shows release notes for closed sprint", async () => {
+      const { server, getTool } = createMockServer();
+      registerSprintsTool(server, () => kb);
+
+      // GET sprint
+      mockFetchResponse({
+        id: 10,
+        name: "Sprint 10",
+        state: "closed",
+        startDate: "2026-02-01T00:00:00Z",
+        endDate: "2026-02-14T00:00:00Z",
+        goal: "Ship auth",
+      });
+      // GET sprint issues
+      mockFetchResponse({
+        issues: [
+          {
+            key: "BP-1",
+            fields: {
+              summary: "Auth feature",
+              status: { name: "Done" },
+              issuetype: { name: "Story" },
+              priority: { name: "High" },
+              assignee: null,
+              story_points: 5,
+            },
+          },
+          {
+            key: "BP-2",
+            fields: {
+              summary: "Fix login bug",
+              status: { name: "Done" },
+              issuetype: { name: "Bug" },
+              priority: { name: "Medium" },
+              assignee: null,
+              story_points: 2,
+            },
+          },
+        ],
+        total: 2,
         maxResults: 50,
       });
 
       const sprints = getTool("sprints");
       const result = await sprints({ action: "get", sprintId: "10" });
       const text = result.content[0]?.text ?? "";
-      expect(text).toContain("Ship the auth module");
+      expect(text).toContain("Release Notes");
+      expect(text).toContain("Sprint 10");
+      expect(text).toContain("Features");
+      expect(text).toContain("Bug Fixes");
+      expect(text).toContain("Ship auth");
+    });
+
+    it("shows basic info for future sprint", async () => {
+      const { server, getTool } = createMockServer();
+      registerSprintsTool(server, () => kb);
+
+      // GET sprint
+      mockFetchResponse({
+        id: 30,
+        name: "Sprint 30",
+        state: "future",
+        startDate: "2026-04-01T00:00:00Z",
+        endDate: "2026-04-14T00:00:00Z",
+        goal: "Plan ahead",
+      });
+      // GET sprint issues
+      mockFetchResponse({
+        issues: makeSprintIssues(["To Do"], [3]),
+        total: 1,
+        maxResults: 50,
+      });
+
+      const sprints = getTool("sprints");
+      const result = await sprints({ action: "get", sprintId: "30" });
+      const text = result.content[0]?.text ?? "";
+      expect(text).toContain("Sprint 30");
+      expect(text).toContain("Future");
+      expect(text).toContain("Plan ahead");
+      expect(text).toContain("Planned Issues");
     });
   });
 
@@ -461,12 +542,12 @@ describe("registerSprintsTool", () => {
     });
   });
 
-  describe("action=health", () => {
-    it("returns health check for active sprint", async () => {
+  describe("action=get (health dashboard)", () => {
+    it("returns health check in active sprint dashboard", async () => {
       const { server, getTool } = createMockServer();
       registerSprintsTool(server, () => kb);
 
-      // list active sprints
+      // list active sprints (resolveSprintId)
       mockFetchResponse({
         values: [{ id: 20, name: "Sprint 20", state: "active" }],
         isLast: true,
@@ -493,6 +574,7 @@ describe("registerSprintsTool", () => {
               priority: { name: "High" },
               assignee: null,
               story_points: 5,
+              updated: new Date().toISOString(),
             },
           },
           {
@@ -504,6 +586,7 @@ describe("registerSprintsTool", () => {
               priority: { name: "Medium" },
               assignee: null,
               story_points: 3,
+              updated: new Date().toISOString(),
             },
           },
           {
@@ -515,6 +598,7 @@ describe("registerSprintsTool", () => {
               priority: { name: "Low" },
               assignee: null,
               story_points: 2,
+              updated: new Date().toISOString(),
             },
           },
         ],
@@ -536,7 +620,7 @@ describe("registerSprintsTool", () => {
       });
 
       const sprints = getTool("sprints");
-      const result = await sprints({ action: "health" });
+      const result = await sprints({ action: "get" });
       const text = result.content[0]?.text ?? "";
       expect(text).toContain("Sprint Health");
       expect(text).toContain("Sprint 20");
@@ -554,17 +638,10 @@ describe("registerSprintsTool", () => {
       expect(text).toContain("Per-Assignee Breakdown");
     });
 
-    it("includes items-by-status breakdown for standup", async () => {
+    it("includes items-by-status breakdown", async () => {
       const { server, getTool } = createMockServer();
       registerSprintsTool(server, () => kb);
 
-      // list active sprints
-      mockFetchResponse({
-        values: [{ id: 20, name: "Sprint 20", state: "active" }],
-        isLast: true,
-        maxResults: 50,
-        startAt: 0,
-      });
       // GET sprint
       mockFetchResponse({
         id: 20,
@@ -625,9 +702,9 @@ describe("registerSprintsTool", () => {
       });
 
       const sprints = getTool("sprints");
-      const result = await sprints({ action: "health" });
+      const result = await sprints({ action: "get", sprintId: "20" });
       const text = result.content[0]?.text ?? "";
-      expect(text).toContain("Items by Status");
+      expect(text).toContain("Issues by Status");
       expect(text).toContain("Done (1)");
       expect(text).toContain("In Progress (1)");
       expect(text).toContain("To Do (1)");
@@ -642,13 +719,6 @@ describe("registerSprintsTool", () => {
 
       const staleDate = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString(); // 5 days ago
 
-      // list active sprints
-      mockFetchResponse({
-        values: [{ id: 20, name: "Sprint 20", state: "active" }],
-        isLast: true,
-        maxResults: 50,
-        startAt: 0,
-      });
       // GET sprint
       mockFetchResponse({
         id: 20,
@@ -697,7 +767,7 @@ describe("registerSprintsTool", () => {
       });
 
       const sprints = getTool("sprints");
-      const result = await sprints({ action: "health" });
+      const result = await sprints({ action: "get", sprintId: "20" });
       const text = result.content[0]?.text ?? "";
       expect(text).toContain("Stale Items");
       expect(text).toContain("BP-40");
@@ -711,13 +781,6 @@ describe("registerSprintsTool", () => {
       const recentDate = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(); // 2 hours ago
       const oldDate = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString(); // 3 days ago
 
-      // list active sprints
-      mockFetchResponse({
-        values: [{ id: 20, name: "Sprint 20", state: "active" }],
-        isLast: true,
-        maxResults: 50,
-        startAt: 0,
-      });
       // GET sprint
       mockFetchResponse({
         id: 20,
@@ -766,7 +829,7 @@ describe("registerSprintsTool", () => {
       });
 
       const sprints = getTool("sprints");
-      const result = await sprints({ action: "health" });
+      const result = await sprints({ action: "get", sprintId: "20" });
       const text = result.content[0]?.text ?? "";
       expect(text).toContain("Recently Completed");
       expect(text).toContain("BP-50");
@@ -779,13 +842,6 @@ describe("registerSprintsTool", () => {
       const { server, getTool } = createMockServer();
       registerSprintsTool(server, () => kb);
 
-      // list active sprints
-      mockFetchResponse({
-        values: [{ id: 20, name: "Sprint 20", state: "active" }],
-        isLast: true,
-        maxResults: 50,
-        startAt: 0,
-      });
       // GET sprint — already >75% elapsed
       const startDate = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString();
       const endDate = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString();
@@ -848,7 +904,7 @@ describe("registerSprintsTool", () => {
       });
 
       const sprints = getTool("sprints");
-      const result = await sprints({ action: "health" });
+      const result = await sprints({ action: "get", sprintId: "20" });
       const text = result.content[0]?.text ?? "";
       expect(text).toContain("At Risk");
       expect(text).toContain("BP-60");
@@ -860,17 +916,10 @@ describe("registerSprintsTool", () => {
       expect(text).not.toMatch(/At Risk[\s\S]*BP-62/);
     });
 
-    it("returns health without capacity when no closed sprints", async () => {
+    it("returns dashboard without capacity when no closed sprints", async () => {
       const { server, getTool } = createMockServer();
       registerSprintsTool(server, () => kb);
 
-      // list active sprints
-      mockFetchResponse({
-        values: [{ id: 20, name: "Sprint 20", state: "active" }],
-        isLast: true,
-        maxResults: 50,
-        startAt: 0,
-      });
       // GET sprint
       mockFetchResponse({
         id: 20,
@@ -894,7 +943,7 @@ describe("registerSprintsTool", () => {
       });
 
       const sprints = getTool("sprints");
-      const result = await sprints({ action: "health" });
+      const result = await sprints({ action: "get", sprintId: "20" });
       const text = result.content[0]?.text ?? "";
       expect(text).toContain("Sprint Health");
       expect(text).toContain("Sprint 20");
@@ -903,28 +952,8 @@ describe("registerSprintsTool", () => {
     });
   });
 
-  describe("action=goal", () => {
-    it("reads sprint goal", async () => {
-      const { server, getTool } = createMockServer();
-      registerSprintsTool(server, () => kb);
-
-      // GET sprint details
-      mockFetchResponse({
-        id: 50,
-        name: "Sprint 50",
-        state: "active",
-        goal: "Complete onboarding flow",
-      });
-
-      const sprints = getTool("sprints");
-      const result = await sprints({ action: "goal", sprintId: "50" });
-      const text = result.content[0]?.text ?? "";
-      expect(text).toContain("Sprint Goal");
-      expect(text).toContain("Sprint 50");
-      expect(text).toContain("Complete onboarding flow");
-    });
-
-    it("sets sprint goal", async () => {
+  describe("action=update", () => {
+    it("updates sprint goal", async () => {
       const { server, getTool } = createMockServer();
       registerSprintsTool(server, () => kb);
 
@@ -932,11 +961,24 @@ describe("registerSprintsTool", () => {
       fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
 
       const sprints = getTool("sprints");
-      const result = await sprints({ action: "goal", sprintId: "50", goal: "New sprint goal" });
+      const result = await sprints({ action: "update", sprintId: "50", goal: "New sprint goal" });
       const text = result.content[0]?.text ?? "";
-      expect(text).toContain("Sprint Goal Updated");
+      expect(text).toContain("Sprint Updated");
       expect(text).toContain("New sprint goal");
       expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("updates sprint name", async () => {
+      const { server, getTool } = createMockServer();
+      registerSprintsTool(server, () => kb);
+
+      fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+      const sprints = getTool("sprints");
+      const result = await sprints({ action: "update", sprintId: "50", name: "Renamed Sprint" });
+      const text = result.content[0]?.text ?? "";
+      expect(text).toContain("Sprint Updated");
+      expect(text).toContain("Renamed Sprint");
     });
 
     it("returns error without sprintId", async () => {
@@ -944,26 +986,19 @@ describe("registerSprintsTool", () => {
       registerSprintsTool(server, () => kb);
 
       const sprints = getTool("sprints");
-      const result = await sprints({ action: "goal" });
+      const result = await sprints({ action: "update", goal: "Some goal" });
       expect(result.isError).toBe(true);
       expect(result.content[0]?.text).toContain("sprintId is required");
     });
 
-    it("shows '(no goal set)' when sprint has no goal", async () => {
+    it("returns error without any update fields", async () => {
       const { server, getTool } = createMockServer();
       registerSprintsTool(server, () => kb);
 
-      mockFetchResponse({
-        id: 60,
-        name: "Sprint 60",
-        state: "active",
-      });
-
       const sprints = getTool("sprints");
-      const result = await sprints({ action: "goal", sprintId: "60" });
-      const text = result.content[0]?.text ?? "";
-      expect(text).toContain("Sprint Goal");
-      expect(text).toContain("(no goal set)");
+      const result = await sprints({ action: "update", sprintId: "50" });
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text).toContain("At least one of");
     });
   });
 });

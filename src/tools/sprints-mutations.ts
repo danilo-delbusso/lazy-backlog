@@ -53,24 +53,38 @@ export async function handleMoveIssuesAction(
   return textResponse(`Moved ${count} issue${plural} to sprint ${params.sprintId}: ${params.issueKeys.join(", ")}`);
 }
 
-/** Handle the 'goal' action (read or set sprint goal). */
-export async function handleGoalAction(
+/** Handle the 'update' action (update sprint name, goal, dates). */
+export async function handleUpdateSprintAction(
   params: {
     sprintId?: string;
     goal?: string;
+    name?: string;
+    startDate?: string;
+    endDate?: string;
   },
   jira: JiraClient,
 ) {
-  if (!params.sprintId) return errorResponse("sprintId is required for 'goal' action.");
+  if (!params.sprintId) return errorResponse("sprintId is required for 'update' action.");
 
-  if (params.goal) {
-    await jira.updateSprint(params.sprintId, { goal: params.goal });
-    return textResponse(`# Sprint Goal Updated\n\n**Sprint:** ${params.sprintId}\n**Goal:** ${params.goal}\n`);
+  const updates: { goal?: string; name?: string; startDate?: string; endDate?: string } = {};
+  if (params.goal !== undefined) updates.goal = params.goal;
+  if (params.name !== undefined) updates.name = params.name;
+  if (params.startDate !== undefined) updates.startDate = params.startDate;
+  if (params.endDate !== undefined) updates.endDate = params.endDate;
+
+  if (Object.keys(updates).length === 0) {
+    return errorResponse("At least one of name, goal, startDate, or endDate is required for 'update' action.");
   }
 
-  const details = await jira.getSprintDetails(params.sprintId);
-  let out = `# Sprint Goal\n\n`;
-  out += `**Sprint:** ${details.name} (${details.id})\n`;
-  out += `**Goal:** ${details.goal || "(no goal set)"}\n`;
+  await jira.updateSprint(params.sprintId, updates);
+
+  const updatedFields = Object.keys(updates).join(", ");
+  let out = `# Sprint Updated\n\n`;
+  out += `**Sprint:** ${params.sprintId}\n`;
+  out += `**Updated fields:** ${updatedFields}\n`;
+  if (updates.name) out += `**Name:** ${updates.name}\n`;
+  if (updates.goal) out += `**Goal:** ${updates.goal}\n`;
+  if (updates.startDate) out += `**Start:** ${updates.startDate}\n`;
+  if (updates.endDate) out += `**End:** ${updates.endDate}\n`;
   return textResponse(out);
 }

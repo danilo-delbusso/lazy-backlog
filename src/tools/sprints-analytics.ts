@@ -81,7 +81,7 @@ export async function handleVelocityAction(
 /*  Health helpers — types                                             */
 /* ------------------------------------------------------------------ */
 
-interface SPBreakdown {
+export interface SPBreakdown {
   totalSP: number;
   doneSP: number;
   inProgressSP: number;
@@ -89,7 +89,7 @@ interface SPBreakdown {
   blockerCount: number;
 }
 
-type HealthStatus = "healthy" | "at-risk" | "critical";
+export type HealthStatus = "healthy" | "at-risk" | "critical";
 
 const HEALTH_INDICATORS: Record<HealthStatus, string> = {
   healthy: "[OK]",
@@ -98,7 +98,7 @@ const HEALTH_INDICATORS: Record<HealthStatus, string> = {
 };
 
 /* ------------------------------------------------------------------ */
-/*  Health helpers — pure functions                                     */
+/*  Health helpers — pure functions (exported for sprints-get.ts)       */
 /* ------------------------------------------------------------------ */
 
 function statusLower(issue: SearchIssue): string {
@@ -109,7 +109,7 @@ function isDone(status: string): boolean {
   return status === "done" || status === "closed" || status === "resolved";
 }
 
-function computeSPBreakdown(issues: SearchIssue[], spFieldId: string | undefined): SPBreakdown {
+export function computeSPBreakdown(issues: SearchIssue[], spFieldId: string | undefined): SPBreakdown {
   let totalSP = 0;
   let doneSP = 0;
   let inProgressSP = 0;
@@ -132,23 +132,28 @@ function computeSPBreakdown(issues: SearchIssue[], spFieldId: string | undefined
   return { totalSP, doneSP, inProgressSP, todoSP, blockerCount };
 }
 
-function pct(part: number, total: number): number {
+export function pct(part: number, total: number): number {
   return total > 0 ? Math.round((part / total) * 100) : 0;
 }
 
-function computeDaysRemaining(endDate: string | undefined): number {
+export function computeDaysRemaining(endDate: string | undefined): number {
   if (!endDate) return 0;
   const end = new Date(endDate);
   return Math.max(0, Math.ceil((end.getTime() - Date.now()) / (1000 * 60 * 60 * 24)));
 }
 
-function assessHealth(blockerCount: number, daysRemaining: number, donePct: number, todoPct: number): HealthStatus {
+export function assessHealth(
+  blockerCount: number,
+  daysRemaining: number,
+  donePct: number,
+  todoPct: number,
+): HealthStatus {
   if (blockerCount > 0 || (daysRemaining <= 2 && donePct < 50)) return "critical";
   if (todoPct > 50 || (daysRemaining <= 5 && donePct < 30)) return "at-risk";
   return "healthy";
 }
 
-function formatProgressSection(
+export function formatProgressSection(
   sprint: JiraSprint,
   health: HealthStatus,
   daysRemaining: number,
@@ -173,7 +178,7 @@ function formatProgressSection(
   return out;
 }
 
-function formatStatusBreakdown(issues: SearchIssue[], spFieldId: string | undefined): string {
+export function formatStatusBreakdown(issues: SearchIssue[], spFieldId: string | undefined): string {
   const byStatus = groupBy(issues, (i) => i.fields.status?.name ?? "Unknown");
   let out = `\n## Items by Status\n\n`;
   for (const [status, statusIssues] of byStatus) {
@@ -188,7 +193,7 @@ function formatStatusBreakdown(issues: SearchIssue[], spFieldId: string | undefi
   return out;
 }
 
-function formatRecentlyCompleted(issues: SearchIssue[]): string {
+export function formatRecentlyCompleted(issues: SearchIssue[]): string {
   const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
   const recent = issues.filter((i) => {
     if (!isDone(statusLower(i))) return false;
@@ -202,7 +207,7 @@ function formatRecentlyCompleted(issues: SearchIssue[]): string {
   return `${out}\n`;
 }
 
-function formatStaleItems(issues: SearchIssue[], staleDays: number): string {
+export function formatStaleItems(issues: SearchIssue[], staleDays: number): string {
   const staleThreshold = new Date(Date.now() - staleDays * 24 * 60 * 60 * 1000);
   const stale = issues.filter((i) => {
     if (!statusLower(i).includes("progress")) return false;
@@ -217,7 +222,7 @@ function formatStaleItems(issues: SearchIssue[], staleDays: number): string {
   return `${out}\n`;
 }
 
-function computeElapsedPct(sprint: JiraSprint): number {
+export function computeElapsedPct(sprint: JiraSprint): number {
   if (!sprint.startDate || !sprint.endDate) return 0;
   const start = new Date(sprint.startDate).getTime();
   const end = new Date(sprint.endDate).getTime();
@@ -226,7 +231,7 @@ function computeElapsedPct(sprint: JiraSprint): number {
   return Math.round(((Date.now() - start) / totalDuration) * 100);
 }
 
-function formatAtRiskItems(issues: SearchIssue[], spFieldId: string | undefined, elapsedPct: number): string {
+export function formatAtRiskItems(issues: SearchIssue[], spFieldId: string | undefined, elapsedPct: number): string {
   const atRisk = issues.filter((i) => {
     const status = statusLower(i);
     if (isDone(status)) return false;
@@ -252,7 +257,7 @@ function capacityRisk(ratio: number): string {
   return "LOW";
 }
 
-function formatCapacitySection(
+export function formatCapacitySection(
   issues: SearchIssue[],
   spFieldId: string | undefined,
   sprintId: string,
@@ -290,51 +295,9 @@ function formatCapacitySection(
 /*  Health — resolve active sprint                                     */
 /* ------------------------------------------------------------------ */
 
-async function resolveSprintId(jira: JiraClient, boardId: string, sprintId?: string): Promise<string | null> {
+export async function resolveSprintId(jira: JiraClient, boardId: string, sprintId?: string): Promise<string | null> {
   if (sprintId) return sprintId;
   const active = await jira.listSprints(boardId, "active");
   const current = active[0];
   return current ? String(current.id) : null;
-}
-
-/* ------------------------------------------------------------------ */
-/*  Health — main handler                                              */
-/* ------------------------------------------------------------------ */
-
-/** Handle the 'health' action (with capacity). */
-export async function handleHealthAction(
-  params: {
-    sprintId?: string;
-    staleDays?: number;
-    sprintCount?: number;
-  },
-  jira: JiraClient,
-  boardId: string,
-  spFieldId: string | undefined,
-) {
-  if (!boardId) return errorResponse("No board ID configured. Set JIRA_BOARD_ID or run configure.");
-
-  const sprintId = await resolveSprintId(jira, boardId, params.sprintId);
-  if (!sprintId) return errorResponse("No active sprints found.");
-
-  const [sprint, sprintIssuesRes] = await Promise.all([jira.getSprint(sprintId), jira.getSprintIssues(sprintId)]);
-  const issues = sprintIssuesRes.issues;
-
-  const bp = computeSPBreakdown(issues, spFieldId);
-  const daysRemaining = computeDaysRemaining(sprint.endDate);
-  const donePctVal = pct(bp.doneSP, bp.totalSP);
-  const todoPctVal = pct(bp.todoSP, bp.totalSP);
-  const health = assessHealth(bp.blockerCount, daysRemaining, donePctVal, todoPctVal);
-  const elapsedPct = computeElapsedPct(sprint);
-
-  let out = formatProgressSection(sprint, health, daysRemaining, bp);
-  out += formatStatusBreakdown(issues, spFieldId);
-  out += formatRecentlyCompleted(issues);
-  out += formatStaleItems(issues, params.staleDays ?? 3);
-  out += formatAtRiskItems(issues, spFieldId, elapsedPct);
-
-  const historicalData = await fetchSprintData(jira, boardId, params.sprintCount ?? 5);
-  out += formatCapacitySection(issues, spFieldId, sprintId, sprint.name, historicalData);
-
-  return textResponse(out);
 }

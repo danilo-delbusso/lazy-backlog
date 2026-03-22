@@ -1,16 +1,15 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { buildJiraClient, errorResponse, textResponse } from "../lib/config.js";
-import { groupBy, type KnowledgeBase } from "../lib/db.js";
+import type { KnowledgeBase } from "../lib/db.js";
 import type { JiraClient } from "../lib/jira.js";
-import type { SearchIssue } from "../lib/jira-types.js";
-import { handleHealthAction } from "./sprints-analytics.js";
-import { handleCreateSprintAction, handleGoalAction, handleMoveIssuesAction } from "./sprints-mutations.js";
-import { getStoryPoints } from "./sprints-utils.js";
+import { handleSmartGetAction } from "./sprints-get.js";
+import { handleCreateSprintAction, handleMoveIssuesAction, handleUpdateSprintAction } from "./sprints-mutations.js";
 
 // ── Barrel re-exports ─────────────────────────────────────────────────────────
 
 export * from "./sprints-analytics.js";
+export * from "./sprints-get.js";
 export * from "./sprints-mutations.js";
 export * from "./sprints-retro.js";
 export * from "./sprints-utils.js";
@@ -57,86 +56,6 @@ async function handleListAction(
   return textResponse(formatSprintsTable(sprints));
 }
 
-function computeStoryPointTotals(issues: SearchIssue[], spFieldId: string | undefined) {
-  let totalSP = 0;
-  let doneSP = 0;
-  let inProgressSP = 0;
-
-  for (const issue of issues) {
-    const sp = getStoryPoints(issue.fields, spFieldId);
-    totalSP += sp;
-    const status = (issue.fields.status?.name ?? "").toLowerCase();
-    if (status === "done" || status === "closed" || status === "resolved") doneSP += sp;
-    else if (status.includes("progress")) inProgressSP += sp;
-  }
-
-  return { totalSP, doneSP, inProgressSP };
-}
-
-function formatSprintHeader(
-  sprint: { name: string; state: string; startDate?: string; endDate?: string },
-  sprintGoal: string | undefined,
-  totals: { totalSP: number; doneSP: number; inProgressSP: number },
-): string {
-  let out = `# ${sprint.name}\n\n`;
-  out += `**State:** ${sprint.state}`;
-  if (sprint.startDate) out += ` | **Start:** ${sprint.startDate.slice(0, 10)}`;
-  if (sprint.endDate) out += ` | **End:** ${sprint.endDate.slice(0, 10)}`;
-  out += "\n";
-  if (sprintGoal) out += `**Goal:** ${sprintGoal}\n`;
-  out += `\n**Story Points:** ${totals.totalSP} total | ${totals.doneSP} done | ${totals.inProgressSP} in progress\n`;
-  return out;
-}
-
-function formatIssuesByStatus(byStatus: Map<string, SearchIssue[]>, spFieldId: string | undefined): string {
-  let out = "\n## Issues by Status\n\n";
-  for (const [status, statusIssues] of byStatus) {
-    out += `### ${status} (${statusIssues.length})\n`;
-    for (const issue of statusIssues) {
-      const sp = getStoryPoints(issue.fields, spFieldId);
-      const spLabel = sp ? ` [${sp}pts]` : "";
-      out += `- ${issue.key}: ${issue.fields.summary}${spLabel}\n`;
-    }
-    out += "\n";
-  }
-  return out;
-}
-
-function formatIssuesByAssignee(byAssignee: Map<string, SearchIssue[]>, spFieldId: string | undefined): string {
-  let out = "## Per-Assignee Breakdown\n\n";
-  for (const [assignee, assigneeIssues] of byAssignee) {
-    const assigneeSP = assigneeIssues.reduce((sum, i) => sum + getStoryPoints(i.fields, spFieldId), 0);
-    out += `### ${assignee} (${assigneeIssues.length} issues, ${assigneeSP} SP)\n`;
-    for (const issue of assigneeIssues) {
-      out += `- ${issue.key}: ${issue.fields.summary} [${issue.fields.status?.name ?? "Unknown"}]\n`;
-    }
-    out += "\n";
-  }
-  return out;
-}
-
-async function handleGetAction(params: { sprintId?: string }, jira: JiraClient, spFieldId: string | undefined) {
-  if (!params.sprintId) return errorResponse("sprintId is required for 'get' action.");
-
-  const [sprint, sprintDetails, sprintIssuesRes] = await Promise.all([
-    jira.getSprint(params.sprintId),
-    jira.getSprintDetails(params.sprintId),
-    jira.getSprintIssues(params.sprintId),
-  ]);
-  const issues = sprintIssuesRes.issues;
-
-  const byStatus = groupBy(issues, (i) => i.fields.status?.name ?? "Unknown");
-  const byAssignee = groupBy(issues, (i) => i.fields.assignee?.displayName ?? "Unassigned");
-  const totals = computeStoryPointTotals(issues, spFieldId);
-  const sprintGoal = sprintDetails.goal ?? sprint.goal;
-
-  let out = formatSprintHeader(sprint, sprintGoal, totals);
-  out += formatIssuesByStatus(byStatus, spFieldId);
-  out += formatIssuesByAssignee(byAssignee, spFieldId);
-
-  return textResponse(out);
-}
-
 // ── Tool Registration ─────────────────────────────────────────────────────────
 
 export function registerSprintsTool(server: McpServer, getKb: () => KnowledgeBase) {
@@ -144,18 +63,25 @@ export function registerSprintsTool(server: McpServer, getKb: () => KnowledgeBas
     "sprints",
     {
       description:
-        "Jira sprint management. Use this tool for sprint CRUD and health checks. Actions: 'list' show sprints (use state='active' for current sprint). 'get' sprint details with full issue breakdown. 'create' a new sprint. 'move-issues' assign issues to a sprint. 'health' active sprint progress, stale items, capacity. 'goal' read or set sprint goal. For velocity, retros, epic progress, and team intelligence use the 'insights' tool. For individual issues use 'issues'. For bug workflows use 'bugs'. For backlog use 'backlog'.",
+        "Jira sprint management. Use this tool for sprint CRUD and monitoring. Actions: 'list' show sprints (use state='active' for current sprint). 'get' context-adaptive sprint view — active sprints show full dashboard with health, use 'since' for standup mode, closed sprints show release notes, future sprints show planned items. 'create' a new sprint. 'update' rename sprint, set goal, or change dates. 'move-issues' assign issues to a sprint. For velocity, retros, epic progress, and team intelligence use the 'insights' tool. For individual issues use 'issues'. For bug workflows use 'bugs'. For backlog use 'backlog'.",
       inputSchema: z.object({
-        action: z.enum(["list", "get", "create", "move-issues", "health", "goal"]),
+        action: z.enum(["list", "get", "create", "update", "move-issues"]),
         state: z.enum(["active", "future", "closed"]).optional().describe("[list] Filter sprints by state"),
-        sprintId: z.string().optional().describe("[get, move-issues, health, goal] Sprint ID to operate on"),
-        name: z.string().optional().describe("[create] Name for the new sprint"),
-        goal: z
+        sprintId: z
           .string()
           .optional()
-          .describe("[create, goal] Sprint goal text. For 'goal' action: set this to update, omit to read"),
-        startDate: z.string().optional().describe("[create] Sprint start date in ISO format, e.g. '2025-03-15'"),
-        endDate: z.string().optional().describe("[create] Sprint end date in ISO format, e.g. '2025-03-29'"),
+          .describe("[get, update, move-issues] Sprint ID to operate on. 'get' defaults to active sprint"),
+        since: z
+          .string()
+          .optional()
+          .describe("[get] ISO date or hours like '24h' — standup mode showing recent changes"),
+        name: z.string().optional().describe("[create, update] Sprint name"),
+        goal: z.string().optional().describe("[create, update] Sprint goal text"),
+        startDate: z
+          .string()
+          .optional()
+          .describe("[create, update] Sprint start date in ISO format, e.g. '2025-03-15'"),
+        endDate: z.string().optional().describe("[create, update] Sprint end date in ISO format, e.g. '2025-03-29'"),
         issueKeys: z
           .array(z.string())
           .optional()
@@ -164,7 +90,7 @@ export function registerSprintsTool(server: McpServer, getKb: () => KnowledgeBas
           .number()
           .default(3)
           .optional()
-          .describe("[health] Days without update before an in-progress item is flagged as stale"),
+          .describe("[get] Days without update before an in-progress item is flagged as stale"),
       }),
     },
     async (params) => {
@@ -178,15 +104,13 @@ export function registerSprintsTool(server: McpServer, getKb: () => KnowledgeBas
           case "list":
             return handleListAction(params, jira, boardId);
           case "get":
-            return handleGetAction(params, jira, spFieldId);
+            return handleSmartGetAction(params, jira, boardId ?? "", spFieldId);
           case "create":
             return handleCreateSprintAction(params, jira, boardId ?? "");
+          case "update":
+            return handleUpdateSprintAction(params, jira);
           case "move-issues":
             return handleMoveIssuesAction(params, jira);
-          case "health":
-            return handleHealthAction(params, jira, boardId ?? "", spFieldId);
-          case "goal":
-            return handleGoalAction(params, jira);
           default:
             return errorResponse(`Unknown action: ${params.action}`);
         }
