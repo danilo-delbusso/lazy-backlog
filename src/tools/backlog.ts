@@ -1,5 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { adfToText } from "../lib/adf.js";
 import { buildJiraClient, errorResponse, textResponse } from "../lib/config.js";
 import type { KnowledgeBase } from "../lib/db.js";
 import { jaccardSimilarity, tokenize } from "../lib/duplicate-detect.js";
@@ -12,24 +13,102 @@ type ToolResponse = {
   isError?: boolean;
 };
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-function formatIssueRow(issue: SearchIssue, spField: string | undefined): string {
-  const f = issue.fields as Record<string, unknown>;
-  const sp =
-    (spField ? (f[spField] as number | undefined) : undefined) ??
-    (f.story_points as number | undefined) ??
-    (f.customfield_10016 as number | undefined);
-  return `| ${issue.key} | ${issue.fields.summary} | ${issue.fields.issuetype?.name ?? "-"} | ${issue.fields.priority?.name ?? "-"} | ${sp ?? "-"} | ${issue.fields.assignee?.displayName || "Unassigned"} |`;
+interface HealthFlags {
+  orphan: boolean;
+  stale: boolean;
+  unestimated: boolean;
+  thin: boolean;
 }
 
-function formatIssueTable(issues: SearchIssue[], spField: string | undefined): string {
-  let out = "| Key | Summary | Type | Priority | SP | Assignee |\n";
-  out += "|-----|---------|------|----------|----|----------|\n";
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+const STALE_DAYS = 14;
+const THIN_THRESHOLD = 100;
+
+function getStoryPoints(issue: SearchIssue, spField: string | undefined): number | undefined {
+  const f = issue.fields as Record<string, unknown>;
+  return (
+    (spField ? (f[spField] as number | undefined) : undefined) ??
+    (f.story_points as number | undefined) ??
+    (f.customfield_10016 as number | undefined)
+  );
+}
+
+function computeHealthFlags(issue: SearchIssue, spField: string | undefined): HealthFlags {
+  const f = issue.fields as Record<string, unknown>;
+
+  const orphan = f.parent == null;
+
+  const updated = issue.fields.updated;
+  let stale = false;
+  if (updated) {
+    const diffMs = Date.now() - new Date(updated).getTime();
+    stale = diffMs > STALE_DAYS * 24 * 60 * 60 * 1000;
+  }
+
+  const unestimated = getStoryPoints(issue, spField) == null;
+
+  let thin = false;
+  const desc = f.description;
+  if (desc == null) {
+    thin = true;
+  } else if (typeof desc === "string") {
+    thin = desc.trim().length < THIN_THRESHOLD;
+  } else {
+    // ADF object — convert to plain text
+    const text = adfToText(desc);
+    thin = text.trim().length < THIN_THRESHOLD;
+  }
+
+  return { orphan, stale, unestimated, thin };
+}
+
+function formatFlagLabels(flags: HealthFlags): string {
+  const labels: string[] = [];
+  if (flags.orphan) labels.push("orphan");
+  if (flags.stale) labels.push("stale");
+  if (flags.unestimated) labels.push("unestimated");
+  if (flags.thin) labels.push("thin");
+  return labels.join(", ");
+}
+
+function formatIssueRow(issue: SearchIssue, spField: string | undefined, flags: HealthFlags): string {
+  const sp = getStoryPoints(issue, spField);
+  const flagStr = formatFlagLabels(flags);
+  return `| ${issue.key} | ${issue.fields.summary} | ${issue.fields.issuetype?.name ?? "-"} | ${issue.fields.priority?.name ?? "-"} | ${sp ?? "-"} | ${issue.fields.assignee?.displayName || "Unassigned"} | ${flagStr} |`;
+}
+
+function formatIssueTable(
+  issues: SearchIssue[],
+  spField: string | undefined,
+  flagsMap: Map<string, HealthFlags>,
+): string {
+  let out = "| Key | Summary | Type | Priority | SP | Assignee | Flags |\n";
+  out += "|-----|---------|------|----------|----|----------|-------|\n";
   for (const issue of issues) {
-    out += `${formatIssueRow(issue, spField)}\n`;
+    const flags = flagsMap.get(issue.key) ?? { orphan: false, stale: false, unestimated: false, thin: false };
+    out += `${formatIssueRow(issue, spField, flags)}\n`;
   }
   return out;
+}
+
+function buildHealthSummary(total: number, flagsMap: Map<string, HealthFlags>): string {
+  let orphaned = 0;
+  let stale = 0;
+  let unestimated = 0;
+  let thin = 0;
+  let healthy = 0;
+
+  for (const flags of flagsMap.values()) {
+    const hasAny = flags.orphan || flags.stale || flags.unestimated || flags.thin;
+    if (!hasAny) healthy++;
+    if (flags.orphan) orphaned++;
+    if (flags.stale) stale++;
+    if (flags.unestimated) unestimated++;
+    if (flags.thin) thin++;
+  }
+
+  return `\n## Backlog Health\n${healthy}/${total} items ready (no flags) | ${orphaned} orphaned | ${unestimated} unestimated | ${stale} stale | ${thin} thin descriptions\n`;
 }
 
 function detectDuplicates(issues: SearchIssue[]): string {
@@ -70,10 +149,7 @@ function detectDuplicates(issues: SearchIssue[]): string {
 
 // ── Action Handlers ──────────────────────────────────────────────────────────
 
-async function handleList(
-  params: { maxResults?: number; detectDuplicates?: boolean },
-  kb: KnowledgeBase,
-): Promise<ToolResponse> {
+async function handleList(params: { maxResults?: number }, kb: KnowledgeBase): Promise<ToolResponse> {
   try {
     const { jira, config } = buildJiraClient(kb);
     const boardId = config.jiraBoardId;
@@ -85,59 +161,23 @@ async function handleList(
       return textResponse("Board backlog is empty.");
     }
 
-    let out = `# Board Backlog (${result.issues.length}/${result.total})\n\n`;
-    out += formatIssueTable(result.issues, jira.storyPointsFieldId);
+    // Compute health flags for each issue
+    const flagsMap = new Map<string, HealthFlags>();
+    for (const issue of result.issues) {
+      flagsMap.set(issue.key, computeHealthFlags(issue, jira.storyPointsFieldId));
+    }
 
-    if (params.detectDuplicates && result.issues.length > 1) {
+    let out = `# Board Backlog (${result.issues.length}/${result.total})\n\n`;
+    out += formatIssueTable(result.issues, jira.storyPointsFieldId, flagsMap);
+    out += buildHealthSummary(result.issues.length, flagsMap);
+
+    if (result.issues.length > 1) {
       out += detectDuplicates(result.issues);
     }
 
     return textResponse(out);
   } catch (err: unknown) {
     return errorResponse(`Backlog failed: ${err instanceof Error ? err.message : String(err)}`);
-  }
-}
-
-function buildBacklogJql(rawJql: string, projectKey?: string): string {
-  const orderExec = /(?:^|\s+)(ORDER\s+BY\s+[^\n]+)$/i.exec(rawJql);
-  const orderClause = orderExec ? ` ${orderExec[1]}` : " ORDER BY rank ASC";
-  const filterPart = (orderExec ? rawJql.slice(0, orderExec.index) : rawJql).trim();
-
-  const hasSprint = /\bsprint\b/i.test(filterPart);
-  let backlogFilter: string;
-  if (hasSprint) {
-    backlogFilter = filterPart;
-  } else if (filterPart) {
-    backlogFilter = `sprint is EMPTY AND (${filterPart})`;
-  } else {
-    backlogFilter = "sprint is EMPTY";
-  }
-
-  const hasProject = /\bproject\s*(?:[=!]|in\b|is\b)/i.test(backlogFilter);
-  const projectScoped = projectKey && !hasProject ? `project = ${projectKey} AND (${backlogFilter})` : backlogFilter;
-
-  return `${projectScoped}${orderClause}`;
-}
-
-async function handleSearch(params: { jql?: string; maxResults?: number }, kb: KnowledgeBase): Promise<ToolResponse> {
-  if (!params.jql) return errorResponse("jql is required for 'search' action.");
-  try {
-    const { jira, config } = buildJiraClient(kb);
-    const maxResults = params.maxResults ?? 50;
-
-    const result = config.jiraBoardId
-      ? await jira.searchBacklogIssues(config.jiraBoardId, params.jql, maxResults)
-      : await jira.searchIssues(buildBacklogJql(params.jql, config.jiraProjectKey), undefined, maxResults);
-
-    if (result.issues.length === 0) {
-      return textResponse(`No backlog items found for: \`${params.jql}\``);
-    }
-
-    let out = `# Backlog Search (${result.issues.length}/${result.total})\n\n`;
-    out += formatIssueTable(result.issues, jira.storyPointsFieldId);
-    return textResponse(out);
-  } catch (err: unknown) {
-    return errorResponse(`Backlog search failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -226,16 +266,10 @@ export function registerBacklogTool(server: McpServer, getKb: () => KnowledgeBas
     "backlog",
     {
       description:
-        "Board backlog management. Actions: 'list' show the board's backlog items via Agile API (board-scoped). 'search' query backlog items via JQL (auto-enforces sprint is EMPTY and project filter). 'rank' reorder backlog items — use position='top'/'bottom' for common operations, or rankBefore/rankAfter for precise placement. To get full details or update a backlog item, use the 'issues' tool with get/update actions.",
+        "Board backlog management with health intelligence. Actions: 'list' shows backlog items with per-item health flags (orphan, stale, unestimated, thin), a health summary, and automatic duplicate detection. 'rank' reorders backlog items — use position='top'/'bottom' for common operations, or rankBefore/rankAfter for precise placement. For JQL-filtered backlog queries, use the 'issues' tool with the 'search' action. To get full details or update a backlog item, use the 'issues' tool with get/update actions.",
       inputSchema: z.object({
-        action: z.enum(["list", "search", "rank"]),
-        maxResults: z.number().max(100).default(50).optional().describe("[list, search] Max issues to return"),
-        detectDuplicates: z
-          .boolean()
-          .default(false)
-          .optional()
-          .describe("[list] Pairwise duplicate detection on backlog items (Jaccard similarity > 40%)"),
-        jql: z.string().optional().describe("[search] JQL query string (auto-filtered to backlog items)"),
+        action: z.enum(["list", "rank"]),
+        maxResults: z.number().max(100).default(50).optional().describe("[list] Max issues to return"),
         issueKey: z.string().optional().describe("[rank] Issue key to reorder, e.g. 'BP-42'"),
         rankBefore: z.string().optional().describe("[rank] Rank this issue before the specified issue key"),
         rankAfter: z.string().optional().describe("[rank] Rank this issue after the specified issue key"),
@@ -251,8 +285,6 @@ export function registerBacklogTool(server: McpServer, getKb: () => KnowledgeBas
       switch (params.action) {
         case "list":
           return handleList(params, kb);
-        case "search":
-          return handleSearch(params, kb);
         case "rank":
           return handleRank(params, kb);
         default:
