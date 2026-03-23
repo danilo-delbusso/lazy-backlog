@@ -5,7 +5,7 @@
 import type { PreparedStatements } from "./db-schema.js";
 import type { BacklogAnalysisRecord, StoredTeamRule } from "./db-types.js";
 
-type InsightRow = {
+export type InsightRow = {
   category: string;
   insight_key: string;
   data: string;

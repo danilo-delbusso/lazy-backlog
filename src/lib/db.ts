@@ -8,6 +8,7 @@ import {
   getInsights as getInsightsHelper,
   getLatestAnalysis as getLatestAnalysisHelper,
   getTeamRules as getTeamRulesHelper,
+  type InsightRow,
   recordAnalysis as recordAnalysisHelper,
   upsertInsight as upsertInsightHelper,
   upsertInsightsBatch,
@@ -327,11 +328,11 @@ export class KnowledgeBase {
     upsertInsightsBatch(this.db, this.stmts, insights);
   }
 
-  getInsights(category: string) {
+  getInsights(category: string): InsightRow[] {
     return getInsightsHelper(this.stmts, category);
   }
 
-  getAllInsights() {
+  getAllInsights(): InsightRow[] {
     return getAllInsightsHelper(this.stmts);
   }
 
