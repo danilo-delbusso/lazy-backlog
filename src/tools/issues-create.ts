@@ -195,7 +195,12 @@ export async function handleCreateAction(
   },
   kb: KnowledgeBase,
 ) {
-  if (!params.summary) return errorResponse("summary is required for 'create' action.");
+  if (!params.summary) {
+    return errorResponse(
+      "summary is required for 'create' action. Pass summary, description, issueType, and priority as top-level parameters — not inside a tickets array. " +
+        "The tickets array is only for bulk creation of multiple tickets. Example: action='create' summary='Fix login bug' issueType='Bug' priority='High'",
+    );
+  }
   if (params.confirmed) return executeCreateConfirmed(kb, params as typeof params & { summary: string });
   return buildCreatePreview(kb, params as typeof params & { summary: string });
 }

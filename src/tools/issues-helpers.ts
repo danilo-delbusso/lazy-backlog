@@ -255,6 +255,40 @@ export function formatSampleTickets(sampleTickets: NonNullable<JiraSchema["sampl
   return out;
 }
 
+/** Highlight required-field differences between the requested type and the default Task type. */
+function formatFieldDifferences(schema: JiraSchema, issueType: string): string {
+  if (issueType === "Task") return "";
+  const taskType = schema.issueTypes.find((t) => t.name === "Task");
+  const requestedType = schema.issueTypes.find((t) => t.name === issueType);
+  if (!taskType || !requestedType) return "";
+
+  const taskRequired = new Set(taskType.requiredFields);
+  const reqRequired = new Set(requestedType.requiredFields);
+
+  const onlyInRequested = requestedType.requiredFields.filter((f) => !taskRequired.has(f));
+  const onlyInTask = taskType.requiredFields.filter((f) => !reqRequired.has(f));
+
+  if (onlyInRequested.length === 0 && onlyInTask.length === 0) return "";
+
+  const lines: string[] = [`### ${issueType} vs Task: Field Differences\n`];
+  if (onlyInRequested.length > 0) {
+    const fieldNames = onlyInRequested.map((id) => {
+      const field = requestedType.fields.find((f) => f.id === id);
+      return field ? `**${field.name}**` : `\`${id}\``;
+    });
+    lines.push(`Required for ${issueType} but not Task: ${fieldNames.join(", ")}`);
+  }
+  if (onlyInTask.length > 0) {
+    const fieldNames = onlyInTask.map((id) => {
+      const field = taskType.fields.find((f) => f.id === id);
+      return field ? `**${field.name}**` : `\`${id}\``;
+    });
+    lines.push(`Required for Task but not ${issueType}: ${fieldNames.join(", ")}`);
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+
 /** Build the schema guidance section for the ticket plan. */
 export function buildSchemaGuidance(schema: JiraSchema | null, issueType: string): string {
   if (!schema) return `> No Jira schema found. Run \`setup\` or \`discover-jira\` first.\n\n`;
@@ -263,6 +297,8 @@ export function buildSchemaGuidance(schema: JiraSchema | null, issueType: string
 
   const ts = schema.issueTypes.find((t) => t.name === issueType);
   if (ts) plan += formatFieldsList(ts, issueType);
+
+  plan += formatFieldDifferences(schema, issueType);
 
   if (schema.sampleTickets?.length) plan += formatSampleTickets(schema.sampleTickets);
 
