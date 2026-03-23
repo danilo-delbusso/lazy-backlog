@@ -221,18 +221,13 @@ function formatScopeCreep(issues: SearchIssue[], sprintStartDate: string | undef
   return out;
 }
 
-function buildTypeTimings(completed: SearchIssue[]): Map<string, number[]> {
+/** Build per-type cycle time from changelog-based cycle data (In Progress → Done). */
+function buildTypeTimings(cycleData: CycleDataItem[]): Map<string, number[]> {
   const typeTimings = new Map<string, number[]>();
-  for (const issue of completed) {
-    const issueType = issue.fields.issuetype?.name ?? "Unknown";
-    const created = issue.fields.created;
-    const updated = issue.fields.updated;
-    if (created && updated) {
-      const days = (new Date(updated).getTime() - new Date(created).getTime()) / (1000 * 60 * 60 * 24);
-      const timings = typeTimings.get(issueType) ?? [];
-      timings.push(Math.round(days * 10) / 10);
-      typeTimings.set(issueType, timings);
-    }
+  for (const item of cycleData) {
+    const timings = typeTimings.get(item.issueType) ?? [];
+    timings.push(item.cycleTimeDays);
+    typeTimings.set(item.issueType, timings);
   }
   return typeTimings;
 }
@@ -250,9 +245,9 @@ function formatSlowItems(cycleData: CycleDataItem[]): string {
   return out;
 }
 
-function formatTimeInStatus(completed: SearchIssue[], cycleData: CycleDataItem[]): string {
-  if (completed.length === 0) return "";
-  const typeTimings = buildTypeTimings(completed);
+function formatTimeInStatus(cycleData: CycleDataItem[]): string {
+  if (cycleData.length === 0) return "";
+  const typeTimings = buildTypeTimings(cycleData);
   if (typeTimings.size === 0) return "";
 
   let out = `\n## Time in Status\n\n`;
@@ -404,7 +399,7 @@ export async function handleRetroAction(
     formatWorkloadDistribution(completed, spFieldId) +
     formatIssueBreakdown(issues) +
     formatScopeCreep(issues, sprint.startDate) +
-    formatTimeInStatus(completed, cycleData);
+    formatTimeInStatus(cycleData);
 
   const suggestions = buildSuggestions("insights", "retro", {});
   return textResponse(out + suggestions);

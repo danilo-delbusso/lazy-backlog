@@ -658,7 +658,61 @@ describe("registerInsightsTool", () => {
 
       vi.spyOn(JiraClient.prototype, "listSprints").mockImplementation(() => Promise.resolve([]));
 
-      vi.spyOn(JiraClient.prototype, "getIssueChangelog").mockImplementation(() => Promise.resolve([]));
+      vi.spyOn(JiraClient.prototype, "getIssueChangelog").mockImplementation((issueKey: string) => {
+        const changelogs: Record<
+          string,
+          Array<{
+            id: string;
+            created: string;
+            author: { displayName: string; accountId: string };
+            items: Array<{ field: string; fromString: string | null; toString: string | null }>;
+          }>
+        > = {
+          "BP-30": [
+            {
+              id: "1",
+              created: "2026-02-16T10:00:00Z",
+              author: { displayName: "dev", accountId: "dev-1" },
+              items: [{ field: "status", fromString: "To Do", toString: "In Progress" }],
+            },
+            {
+              id: "2",
+              created: "2026-02-20T10:00:00Z",
+              author: { displayName: "dev", accountId: "dev-1" },
+              items: [{ field: "status", fromString: "In Progress", toString: "Done" }],
+            },
+          ],
+          "BP-31": [
+            {
+              id: "3",
+              created: "2026-02-16T12:00:00Z",
+              author: { displayName: "dev", accountId: "dev-1" },
+              items: [{ field: "status", fromString: "To Do", toString: "In Progress" }],
+            },
+            {
+              id: "4",
+              created: "2026-02-18T10:00:00Z",
+              author: { displayName: "dev", accountId: "dev-1" },
+              items: [{ field: "status", fromString: "In Progress", toString: "Done" }],
+            },
+          ],
+          "BP-32": [
+            {
+              id: "5",
+              created: "2026-02-17T10:00:00Z",
+              author: { displayName: "dev", accountId: "dev-1" },
+              items: [{ field: "status", fromString: "To Do", toString: "In Progress" }],
+            },
+            {
+              id: "6",
+              created: "2026-02-25T10:00:00Z",
+              author: { displayName: "dev", accountId: "dev-1" },
+              items: [{ field: "status", fromString: "In Progress", toString: "Done" }],
+            },
+          ],
+        };
+        return Promise.resolve(changelogs[issueKey] ?? []);
+      });
 
       const insights = getTool("insights");
       const result = await insights({ action: "retro", sprintId: "16" });
