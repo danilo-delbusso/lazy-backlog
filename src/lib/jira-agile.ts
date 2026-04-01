@@ -361,6 +361,14 @@ export async function getIssueLinks(
   return links;
 }
 
+/** Remove an issue link by its ID. */
+export async function removeIssueLink(
+  request: RequestFn,
+  linkId: string,
+): Promise<void> {
+  await request<void>("DELETE", `/rest/api/3/issueLink/${encodeURIComponent(linkId)}`);
+}
+
 // ── Dev Status ───────────────────────────────────────────────────────────────
 
 /** Fetch dev status (PRs, commits, builds) for an issue. Returns counts; best-effort (returns empty on 403/404). */
