@@ -138,9 +138,7 @@ async function applyRemoveLinks(
   const existingLinks = await jira.getIssueLinks(issueKey);
   let removed = 0;
   for (const toRemove of removeLinks) {
-    const match = existingLinks.find(
-      (l) => l.type === toRemove.linkType && l.linkedIssue.key === toRemove.targetKey,
-    );
+    const match = existingLinks.find((l) => l.type === toRemove.linkType && l.linkedIssue.key === toRemove.targetKey);
     if (match) {
       await jira.removeIssueLink(match.id);
       removed++;

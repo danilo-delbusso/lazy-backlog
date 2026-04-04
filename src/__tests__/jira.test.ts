@@ -1295,10 +1295,10 @@ describe("JiraClient", () => {
 
       const links = await client.getIssueLinks("BP-1");
       expect(links).toHaveLength(2);
-      expect(links[0].direction).toBe("inward");
-      expect(links[0].id).toBe("10003");
-      expect(links[1].direction).toBe("outward");
-      expect(links[1].id).toBe("10003");
+      expect(links[0]?.direction).toBe("inward");
+      expect(links[0]?.id).toBe("10003");
+      expect(links[1]?.direction).toBe("outward");
+      expect(links[1]?.id).toBe("10003");
     });
 
     it("defaults missing summary and status fields gracefully", async () => {
@@ -1320,8 +1320,8 @@ describe("JiraClient", () => {
 
       const links = await client.getIssueLinks("BP-1");
       expect(links).toHaveLength(1);
-      expect(links[0].linkedIssue.summary).toBe("");
-      expect(links[0].linkedIssue.status).toBe("Unknown");
+      expect(links[0]?.linkedIssue.summary).toBe("");
+      expect(links[0]?.linkedIssue.status).toBe("Unknown");
     });
 
     it("returns empty array when no links exist", async () => {

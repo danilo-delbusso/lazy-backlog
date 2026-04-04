@@ -362,10 +362,7 @@ export async function getIssueLinks(
 }
 
 /** Remove an issue link by its ID. */
-export async function removeIssueLink(
-  request: RequestFn,
-  linkId: string,
-): Promise<void> {
+export async function removeIssueLink(request: RequestFn, linkId: string): Promise<void> {
   await request<void>("DELETE", `/rest/api/3/issueLink/${encodeURIComponent(linkId)}`);
 }
 
